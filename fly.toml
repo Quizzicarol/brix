@@ -8,6 +8,12 @@ primary_region = 'ams'
 
 [build]
 
+[env]
+  PORT = '8080'
+  HOST = '0.0.0.0'
+  BRIX_DOMAIN = 'brix.brostr.app'
+  DB_PATH = '/data/brix.db'
+
 [http_service]
   internal_port = 8080
   force_https = true
@@ -16,8 +22,11 @@ primary_region = 'ams'
   min_machines_running = 0
   processes = ['app']
 
+[mounts]
+  source = 'brix_data'
+  destination = '/data'
+
 [[vm]]
-  memory = '1gb'
+  memory = '256mb'
   cpu_kind = 'shared'
   cpus = 1
-  memory_mb = 256
