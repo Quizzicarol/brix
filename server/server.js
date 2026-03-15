@@ -12,6 +12,9 @@ const app = express();
 const PORT = process.env.PORT || 3100;
 const HOST = process.env.HOST || '0.0.0.0';
 
+// Trust proxy (required behind Fly.io reverse proxy for rate limiting)
+app.set('trust proxy', 1);
+
 // Security
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
