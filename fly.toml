@@ -1,26 +1,23 @@
-app = 'brix-server'
-primary_region = 'gru'
+# fly.toml app configuration file generated for brix on 2026-03-15T11:20:21Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'brix'
+primary_region = 'ams'
 
 [build]
 
-[env]
-  PORT = '3100'
-  HOST = '0.0.0.0'
-  BRIX_DOMAIN = 'brix.brostr.app'
-  DB_PATH = '/data/brix.db'
-
 [http_service]
-  internal_port = 3100
+  internal_port = 8080
   force_https = true
   auto_stop_machines = 'stop'
   auto_start_machines = true
   min_machines_running = 0
-
-[mounts]
-  source = 'brix_data'
-  destination = '/data'
+  processes = ['app']
 
 [[vm]]
-  memory = '256mb'
+  memory = '1gb'
   cpu_kind = 'shared'
   cpus = 1
+  memory_mb = 256
