@@ -2,6 +2,7 @@ node_modules
 **/node_modules
 .git
 .env
+**/.env
 *.md
 fly.toml
 .gitignore
