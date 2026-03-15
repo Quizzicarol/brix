@@ -16,9 +16,21 @@ router.get('/check-username/:username', (req, res) => {
   }
 
   const db = getDb();
-  const existing = db.prepare('SELECT id FROM brix_users WHERE username = ? AND verified = 1').get(username);
+  const existing = db.prepare('SELECT id, verified FROM brix_users WHERE username = ?').get(username);
 
-  res.json({ available: !existing, username });
+  // Block if username is already taken (verified blocks always, unverified blocks only if recent)
+  if (existing) {
+    if (existing.verified) {
+      return res.json({ available: false, username });
+    }
+    // Unverified entries older than 1 hour are considered stale and can be reclaimed
+    const stale = db.prepare("SELECT id FROM brix_users WHERE id = ? AND created_at < datetime('now', '-1 hour')").get(existing.id);
+    if (!stale) {
+      return res.json({ available: false, username });
+    }
+  }
+
+  res.json({ available: true, username });
 });
 
 /**
@@ -43,48 +55,108 @@ router.post('/register', async (req, res) => {
 
   const nostr_pubkey = bodyPubkey || req.headers['x-nostr-pubkey'] || `web_${crypto.randomBytes(16).toString('hex')}`;
   const db = getDb();
+  const cleanPhone = phone ? phone.replace(/\D/g, '') : null;
+  const cleanEmail = email ? email.trim().toLowerCase() : null;
 
-  // Check username availability (only verified users block)
-  const existingUsername = db.prepare('SELECT id, verified, nostr_pubkey FROM brix_users WHERE username = ?').get(cleanUsername);
+  // Check if username is already taken
+  const existingUsername = db.prepare('SELECT id, verified, nostr_pubkey, email, phone FROM brix_users WHERE username = ?').get(cleanUsername);
   if (existingUsername && existingUsername.verified) {
     return res.status(409).json({ error: 'Este username já está em uso' });
   }
 
-  const cleanPhone = phone ? phone.replace(/\D/g, '') : null;
-  const cleanEmail = email ? email.trim().toLowerCase() : null;
-
-  // Check if email is already used by a verified user with a different username
+  // Check if email is already used by ANY user (verified or not) with a DIFFERENT username
   if (cleanEmail) {
-    const existingEmail = db.prepare('SELECT id, username FROM brix_users WHERE email = ? AND verified = 1').get(cleanEmail);
+    const existingEmail = db.prepare('SELECT id, username, verified FROM brix_users WHERE email = ? AND username != ?').get(cleanEmail, cleanUsername);
     if (existingEmail) {
-      return res.status(409).json({ error: `Este email já está vinculado ao username "${existingEmail.username}"` });
+      if (existingEmail.verified) {
+        return res.status(409).json({ error: `Este email já está vinculado ao username "${existingEmail.username}"` });
+      }
+      // Clean up stale unverified entry with different username but same email
+      db.prepare('DELETE FROM brix_verifications WHERE user_id = ?').run(existingEmail.id);
+      db.prepare('DELETE FROM brix_users WHERE id = ?').run(existingEmail.id);
     }
   }
 
-  // Check if phone is already used by a verified user with a different username
+  // Check if phone is already used by ANY user (verified or not) with a DIFFERENT username
   if (cleanPhone) {
-    const existingPhone = db.prepare('SELECT id, username FROM brix_users WHERE phone = ? AND verified = 1').get(cleanPhone);
+    const existingPhone = db.prepare('SELECT id, username, verified FROM brix_users WHERE phone = ? AND username != ?').get(cleanPhone, cleanUsername);
     if (existingPhone) {
-      return res.status(409).json({ error: `Este celular já está vinculado ao username "${existingPhone.username}"` });
+      if (existingPhone.verified) {
+        return res.status(409).json({ error: `Este celular já está vinculado ao username "${existingPhone.username}"` });
+      }
+      // Clean up stale unverified entry with different username but same phone
+      db.prepare('DELETE FROM brix_verifications WHERE user_id = ?').run(existingPhone.id);
+      db.prepare('DELETE FROM brix_users WHERE id = ?').run(existingPhone.id);
     }
   }
 
-  // Cleanup unverified entries with same username
+  const hasSmtp = !!process.env.SMTP_USER;
+  const domain = process.env.BRIX_DOMAIN || 'brix.app';
+
+  // If unverified entry exists with same username, update it instead of delete+recreate
   if (existingUsername && !existingUsername.verified) {
-    db.prepare('DELETE FROM brix_verifications WHERE user_id = ?').run(existingUsername.id);
-    db.prepare('DELETE FROM brix_users WHERE id = ?').run(existingUsername.id);
+    const userId = existingUsername.id;
+    db.prepare(`
+      UPDATE brix_users SET phone = ?, email = ?, nostr_pubkey = ?, updated_at = datetime('now')
+      WHERE id = ?
+    `).run(cleanPhone, cleanEmail, nostr_pubkey, userId);
+
+    // Invalidate old verification codes
+    db.prepare("UPDATE brix_verifications SET used = 1 WHERE user_id = ? AND used = 0").run(userId);
+
+    if (!hasSmtp) {
+      db.prepare("UPDATE brix_users SET verified = 1, updated_at = datetime('now') WHERE id = ?").run(userId);
+      console.log(`[BRIX] Auto-verificado (atualização, sem SMTP): ${cleanUsername}@${domain}`);
+      return res.json({
+        success: true,
+        verified: true,
+        message: 'BRIX criado e ativado!',
+        user_id: userId,
+        username: cleanUsername,
+        brix_address: `${cleanUsername}@${domain}`,
+      });
+    }
+
+    // Generate new verification code
+    const code = String(crypto.randomInt(100000, 999999));
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    const verificationId = crypto.randomUUID();
+    const verifyVia = cleanPhone ? 'sms' : 'email';
+    const destination = cleanPhone || cleanEmail;
+
+    db.prepare(`
+      INSERT INTO brix_verifications (id, user_id, code, type, destination, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(verificationId, userId, code, verifyVia, destination, expiresAt);
+
+    console.log(`[BRIX] Código de verificação (re-registro) para ${destination}: ${code}`);
+
+    let emailSent = false;
+    if (verifyVia === 'email' && cleanEmail) {
+      try { emailSent = await sendVerificationCode(cleanEmail, code); } catch (err) {
+        console.error(`[BRIX] Erro ao enviar email: ${err.message}`);
+      }
+    }
+
+    return res.json({
+      success: true,
+      verified: false,
+      message: emailSent ? 'Código enviado para seu email' : 'Erro ao enviar email',
+      user_id: userId,
+      username: cleanUsername,
+      verify_via: verifyVia,
+    });
   }
 
+  // New registration
   const userId = crypto.randomUUID();
   db.prepare(`
     INSERT INTO brix_users (id, username, phone, email, nostr_pubkey)
     VALUES (?, ?, ?, ?, ?)
   `).run(userId, cleanUsername, cleanPhone, cleanEmail, nostr_pubkey);
 
-  // Send verification to phone (priority) or email
   const verifyVia = cleanPhone ? 'sms' : 'email';
   const destination = cleanPhone || cleanEmail;
-
   const code = String(crypto.randomInt(100000, 999999));
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
   const verificationId = crypto.randomUUID();
@@ -96,9 +168,7 @@ router.post('/register', async (req, res) => {
 
   console.log(`[BRIX] Código de verificação para ${destination}: ${code}`);
 
-  // Send email if verification is via email
   let emailSent = false;
-  const hasSmtp = !!process.env.SMTP_USER;
   if (verifyVia === 'email' && cleanEmail && hasSmtp) {
     try {
       emailSent = await sendVerificationCode(cleanEmail, code);
@@ -109,7 +179,6 @@ router.post('/register', async (req, res) => {
 
   // Auto-verify when SMTP is not configured (no email service available)
   if (!hasSmtp) {
-    const domain = process.env.BRIX_DOMAIN || 'brix.app';
     const tx = db.transaction(() => {
       db.prepare('UPDATE brix_verifications SET used = 1 WHERE id = ?').run(verificationId);
       db.prepare("UPDATE brix_users SET verified = 1, updated_at = datetime('now') WHERE id = ?").run(userId);
