@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BRIX — Crie seu endereço Bitcoin</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="brix-page">
+
+  <!-- NAV -->
+  <nav class="navbar">
+    <div class="nav-container">
+      <a href="index.html" class="nav-logo">BRO</a>
+      <div class="nav-links">
+        <a href="index.html">← Voltar ao site</a>
+        <span style="color: var(--orange); font-weight: 700;">⚡ BRIX</span>
+      </div>
+      <button class="nav-mobile-toggle" onclick="toggleMobileMenu()">☰</button>
+    </div>
+  </nav>
+
+  <!-- HEADER -->
+  <div class="brix-page-header">
+    <h1>⚡ BRIX</h1>
+    <p>Brix: o pix do Bro. Envie Bitcoin pelo seu email ou número de celular.</p>
+  </div>
+
+  <!-- FORM CONTAINER -->
+  <div class="brix-form-container">
+
+    <!-- STEP 1: Registration -->
+    <div class="brix-form-card" id="step1">
+      <h2>Crie seu BRIX</h2>
+
+      <!-- Username input -->
+      <div class="brix-input-group">
+        <label>Escolha seu apelido</label>
+        <input
+          type="text"
+          class="brix-input"
+          id="usernameInput"
+          placeholder="fulano"
+          oninput="onUsernameInput()"
+          maxlength="20"
+          pattern="[a-z0-9_]+"
+        >
+        <div id="usernameStatus" style="font-size: 13px; margin-top: 4px; min-height: 18px;"></div>
+      </div>
+
+      <!-- Live preview -->
+      <div class="brix-preview" id="preview">
+        <div class="brix-preview-label">Seu endereço BRIX será</div>
+        <div class="brix-preview-address" id="previewAddress">...@brix.app</div>
+      </div>
+
+      <div class="brix-type-selector">
+        <button class="brix-type-btn active" id="btnPhone" onclick="selectType('phone')">
+          📱 Celular
+        </button>
+        <button class="brix-type-btn" id="btnEmail" onclick="selectType('email')">
+          📧 Email
+        </button>
+      </div>
+
+      <!-- Phone input -->
+      <div class="brix-input-group" id="phoneGroup">
+        <label>Celular (para verificação)</label>
+        <input
+          type="tel"
+          class="brix-input"
+          id="phoneInput"
+          placeholder="+55 11 99988-7766"
+          maxlength="20"
+        >
+      </div>
+
+      <!-- Email input -->
+      <div class="brix-input-group hidden" id="emailGroup">
+        <label>Email (para verificação)</label>
+        <input
+          type="email"
+          class="brix-input"
+          id="emailInput"
+          placeholder="seu@email.com"
+        >
+      </div>
+
+      <button class="brix-submit" id="submitBtn" onclick="submitRegistration()" disabled>
+        Criar meu BRIX →
+      </button>
+
+      <p style="text-align: center; margin-top: 16px; font-size: 13px; color: var(--text-muted);">
+        Enviaremos um código de verificação
+      </p>
+    </div>
+
+    <!-- STEP 2: Verification -->
+    <div class="brix-form-card hidden" id="step2">
+      <h2>Verificação</h2>
+      <p style="color: var(--text-secondary); margin-bottom: 8px;">
+        Enviamos um código de 6 dígitos para:
+      </p>
+      <p style="color: var(--orange); font-weight: 600; margin-bottom: 8px;" id="verifyDestination">
+        +55 11 99988-7766
+      </p>
+      <p class="hidden" id="devCodeHint" style="color: var(--green); font-size: 14px; background: rgba(74,222,128,0.1); padding: 8px 16px; border-radius: 8px; margin-bottom: 8px;">
+      </p>
+
+      <div class="brix-code-inputs">
+        <input type="text" class="brix-code-digit" maxlength="1" data-index="0" oninput="onCodeInput(this)" onkeydown="onCodeKeydown(event, this)">
+        <input type="text" class="brix-code-digit" maxlength="1" data-index="1" oninput="onCodeInput(this)" onkeydown="onCodeKeydown(event, this)">
+        <input type="text" class="brix-code-digit" maxlength="1" data-index="2" oninput="onCodeInput(this)" onkeydown="onCodeKeydown(event, this)">
+        <input type="text" class="brix-code-digit" maxlength="1" data-index="3" oninput="onCodeInput(this)" onkeydown="onCodeKeydown(event, this)">
+        <input type="text" class="brix-code-digit" maxlength="1" data-index="4" oninput="onCodeInput(this)" onkeydown="onCodeKeydown(event, this)">
+        <input type="text" class="brix-code-digit" maxlength="1" data-index="5" oninput="onCodeInput(this)" onkeydown="onCodeKeydown(event, this)">
+      </div>
+
+      <button class="brix-submit" id="verifyBtn" onclick="verifyCode()" disabled>
+        Verificar →
+      </button>
+
+      <div class="brix-resend">
+        <a id="resendLink">Reenviar código (<span id="resendTimer">45</span>s)</a>
+      </div>
+    </div>
+
+    <!-- STEP 3: Success -->
+    <div class="brix-form-card hidden" id="step3">
+      <div class="brix-success">
+        <div class="brix-success-icon">⚡</div>
+        <h3>BRIX Ativado!</h3>
+        <p>Seu endereço Bitcoin está pronto. Qualquer pessoa pode te enviar sats.</p>
+
+        <div class="brix-success-address" id="successAddress">
+          fulano@brix.app
+        </div>
+
+        <p>Baixe o Bro App para acessar seu saldo e gerenciar seu BRIX.</p>
+
+        <div class="brix-download-buttons">
+          <a href="#" class="btn btn-primary">Android (APK)</a>
+          <a href="#" class="btn btn-outline">iOS (TestFlight)</a>
+        </div>
+
+        <p style="margin-top: 24px; font-size: 13px; color: var(--text-muted);">
+          Ao abrir o app, seus sats recebidos estarão lá automaticamente.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- APP MOCKUPS SECTION -->
+  <section class="app-mockups-section">
+    <h2>Como fica no Bro App</h2>
+    <p class="section-text">Gerencie seu BRIX direto no aplicativo</p>
+
+    <div class="app-mockups-row">
+
+      <!-- MOCKUP 1: BRIX Settings / Management -->
+      <div class="app-mockup-item">
+        <div class="phone-frame">
+          <div class="phone-notch"></div>
+          <div class="phone-content">
+            <div class="app-status-bar">
+              <span>9:41</span>
+              <span>⚡ 📶</span>
+            </div>
+
+            <div class="app-header-bar">
+              <span class="app-back-btn">←</span>
+              <span class="app-header-title">⚡ Meu BRIX</span>
+            </div>
+
+            <!-- Active address card -->
+            <div class="app-card" style="border-color: rgba(245,158,11,0.3);">
+              <div class="app-label">SEU ENDEREÇO BRIX</div>
+              <div class="app-value-orange" style="font-size: 16px; margin: 8px 0;">
+                fulano@brix.app
+              </div>
+              <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
+                <span class="app-badge-active">● Ativo</span>
+                <span style="font-size: 11px; color: var(--text-muted);">Verificado via SMS</span>
+              </div>
+            </div>
+
+            <!-- Stats -->
+            <div style="display: flex; gap: 10px;">
+              <div class="app-card" style="flex: 1; text-align: center;">
+                <div class="app-label">RECEBIDO TOTAL</div>
+                <div style="font-size: 20px; font-weight: 700; color: var(--green);">4,250</div>
+                <div style="font-size: 11px; color: var(--text-muted);">sats</div>
+              </div>
+              <div class="app-card" style="flex: 1; text-align: center;">
+                <div class="app-label">PENDENTE</div>
+                <div style="font-size: 20px; font-weight: 700; color: var(--orange);">500</div>
+                <div style="font-size: 11px; color: var(--text-muted);">sats</div>
+              </div>
+            </div>
+
+            <!-- Actions -->
+            <div class="app-card">
+              <div class="app-label">AÇÕES</div>
+              <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
+                <div class="app-btn-mock" style="font-size: 13px; padding: 10px;">
+                  📋 Copiar endereço
+                </div>
+                <div class="app-btn-mock" style="font-size: 13px; padding: 10px; background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border);">
+                  📤 Compartilhar QR Code
+                </div>
+              </div>
+            </div>
+
+            <!-- Danger zone -->
+            <div class="app-card" style="border-color: rgba(248,113,113,0.2);">
+              <div class="app-label" style="color: #f87171;">CONFIGURAÇÕES</div>
+              <div class="app-btn-mock-outline" style="margin-top: 8px;">
+                Desativar BRIX
+              </div>
+            </div>
+
+            <!-- Tab bar -->
+            <div class="app-tab-bar">
+              <div class="app-tab"><div class="app-tab-icon">🏠</div>Home</div>
+              <div class="app-tab"><div class="app-tab-icon">📋</div>Ordens</div>
+              <div class="app-tab"><div class="app-tab-icon">💰</div>Wallet</div>
+              <div class="app-tab active"><div class="app-tab-icon">⚡</div>BRIX<span class="notification-dot"></span></div>
+              <div class="app-tab"><div class="app-tab-icon">⚙️</div>Config</div>
+            </div>
+          </div>
+        </div>
+        <p class="mockup-label">Gerenciamento BRIX</p>
+      </div>
+
+      <!-- MOCKUP 2: BRIX Registration in App -->
+      <div class="app-mockup-item">
+        <div class="phone-frame">
+          <div class="phone-notch"></div>
+          <div class="phone-content">
+            <div class="app-status-bar">
+              <span>9:41</span>
+              <span>⚡ 📶</span>
+            </div>
+
+            <div class="app-header-bar">
+              <span class="app-back-btn">←</span>
+              <span class="app-header-title">Ativar BRIX</span>
+            </div>
+
+            <div style="text-align: center; padding: 16px 0;">
+              <div style="font-size: 48px;">⚡</div>
+              <div style="font-size: 20px; font-weight: 700; color: var(--orange); margin-top: 8px;">BRIX</div>
+              <p style="font-size: 13px; color: var(--text-secondary); margin-top: 8px; line-height: 1.5;">
+                Receba Bitcoin pelo celular ou email, mesmo offline!
+              </p>
+            </div>
+
+            <div class="app-card">
+              <div class="app-label">TIPO</div>
+              <div style="display: flex; gap: 8px; margin-top: 8px;">
+                <div style="flex: 1; padding: 10px; background: rgba(245,158,11,0.1); border: 1.5px solid var(--orange); border-radius: 8px; text-align: center; font-size: 13px; color: var(--orange); font-weight: 600;">
+                  📱 Telefone
+                </div>
+                <div style="flex: 1; padding: 10px; background: var(--bg-primary); border: 1.5px solid var(--border); border-radius: 8px; text-align: center; font-size: 13px; color: var(--text-muted);">
+                  📧 Email
+                </div>
+              </div>
+            </div>
+
+            <div class="app-card">
+              <div class="app-label">NÚMERO DO CELULAR</div>
+              <div class="app-input-mock" style="color: var(--text-primary);">
+                +55 11 99988-7766
+              </div>
+              <div style="margin-top: 12px; padding: 10px; background: rgba(245,158,11,0.06); border: 1px solid rgba(245,158,11,0.15); border-radius: 8px; text-align: center;">
+                <span style="font-size: 11px; color: var(--text-muted);">Seu BRIX:</span>
+                <div style="font-size: 14px; color: var(--orange); font-weight: 600; font-family: monospace; margin-top: 2px;">
+                  fulano@brix.app
+                </div>
+              </div>
+            </div>
+
+            <div class="app-btn-mock">
+              ⚡ Ativar BRIX
+            </div>
+
+            <p style="text-align: center; margin-top: 12px; font-size: 11px; color: var(--text-muted);">
+              Enviaremos um código SMS para verificação
+            </p>
+
+            <!-- Tab bar -->
+            <div class="app-tab-bar">
+              <div class="app-tab"><div class="app-tab-icon">🏠</div>Home</div>
+              <div class="app-tab"><div class="app-tab-icon">📋</div>Ordens</div>
+              <div class="app-tab"><div class="app-tab-icon">💰</div>Wallet</div>
+              <div class="app-tab active"><div class="app-tab-icon">⚡</div>BRIX</div>
+              <div class="app-tab"><div class="app-tab-icon">⚙️</div>Config</div>
+            </div>
+          </div>
+        </div>
+        <p class="mockup-label">Registro BRIX no App</p>
+      </div>
+
+      <!-- MOCKUP 3: Pending Payments / History -->
+      <div class="app-mockup-item">
+        <div class="phone-frame">
+          <div class="phone-notch"></div>
+          <div class="phone-content">
+            <div class="app-status-bar">
+              <span>9:41</span>
+              <span>⚡ 📶</span>
+            </div>
+
+            <div class="app-header-bar">
+              <span class="app-back-btn">←</span>
+              <span class="app-header-title">Recebimentos BRIX</span>
+            </div>
+
+            <!-- Pending notification -->
+            <div class="app-card" style="border-color: rgba(245,158,11,0.4); background: rgba(245,158,11,0.05);">
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="font-size: 20px;">⚡</span>
+                <div style="flex: 1;">
+                  <div style="font-size: 14px; font-weight: 600;">2 pagamentos pendentes</div>
+                  <div style="font-size: 12px; color: var(--text-muted);">Recebidos enquanto offline</div>
+                </div>
+                <div class="app-badge-pending">500 sats</div>
+              </div>
+              <div class="app-btn-mock" style="font-size: 13px; padding: 10px; margin-top: 12px;">
+                Resgatar agora
+              </div>
+            </div>
+
+            <!-- History -->
+            <div class="app-card">
+              <div class="app-label">HISTÓRICO</div>
+
+              <div class="app-payment-item">
+                <div>
+                  <div style="font-size: 13px; font-weight: 500;">Pagamento recebido</div>
+                  <div class="app-payment-date">11 mar 2026, 14:32</div>
+                </div>
+                <div style="text-align: right;">
+                  <div class="app-payment-amount">+250 sats</div>
+                  <div class="app-payment-status app-badge-active">Resgatado</div>
+                </div>
+              </div>
+
+              <div class="app-payment-item">
+                <div>
+                  <div style="font-size: 13px; font-weight: 500;">Pagamento recebido</div>
+                  <div class="app-payment-date">11 mar 2026, 13:15</div>
+                </div>
+                <div style="text-align: right;">
+                  <div class="app-payment-amount">+300 sats</div>
+                  <div class="app-payment-status app-badge-pending">Pendente</div>
+                </div>
+              </div>
+
+              <div class="app-payment-item">
+                <div>
+                  <div style="font-size: 13px; font-weight: 500;">Pagamento recebido</div>
+                  <div class="app-payment-date">11 mar 2026, 10:48</div>
+                </div>
+                <div style="text-align: right;">
+                  <div class="app-payment-amount">+200 sats</div>
+                  <div class="app-payment-status app-badge-pending">Pendente</div>
+                </div>
+              </div>
+
+              <div class="app-payment-item">
+                <div>
+                  <div style="font-size: 13px; font-weight: 500;">Pagamento recebido</div>
+                  <div class="app-payment-date">10 mar 2026, 22:01</div>
+                </div>
+                <div style="text-align: right;">
+                  <div class="app-payment-amount">+1,500 sats</div>
+                  <div class="app-payment-status app-badge-active">Resgatado</div>
+                </div>
+              </div>
+
+              <div class="app-payment-item" style="border: none;">
+                <div>
+                  <div style="font-size: 13px; font-weight: 500;">Pagamento recebido</div>
+                  <div class="app-payment-date">10 mar 2026, 18:44</div>
+                </div>
+                <div style="text-align: right;">
+                  <div class="app-payment-amount">+2,000 sats</div>
+                  <div class="app-payment-status app-badge-active">Resgatado</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Tab bar -->
+            <div class="app-tab-bar">
+              <div class="app-tab"><div class="app-tab-icon">🏠</div>Home</div>
+              <div class="app-tab"><div class="app-tab-icon">📋</div>Ordens</div>
+              <div class="app-tab"><div class="app-tab-icon">💰</div>Wallet</div>
+              <div class="app-tab active"><div class="app-tab-icon">⚡</div>BRIX<span class="notification-dot"></span></div>
+              <div class="app-tab"><div class="app-tab-icon">⚙️</div>Config</div>
+            </div>
+          </div>
+        </div>
+        <p class="mockup-label">Recebimentos & Histórico</p>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-content">
+        <div class="footer-logo">BRO</div>
+        <p>2026 Bro. Feito com 💚 para conectar pessoas.</p>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // Config
+    const API_BASE = window.location.origin;
+
+    // State
+    let currentType = 'phone';
+    let currentUserId = null;
+    let devCode = null;
+    let resendCountdown = 45;
+    let timerInterval = null;
+    let usernameTimer = null;
+    let usernameAvailable = false;
+
+    function selectType(type) {
+      currentType = type;
+      document.getElementById('btnPhone').classList.toggle('active', type === 'phone');
+      document.getElementById('btnEmail').classList.toggle('active', type === 'email');
+      document.getElementById('phoneGroup').classList.toggle('hidden', type !== 'phone');
+      document.getElementById('emailGroup').classList.toggle('hidden', type !== 'email');
+    }
+
+    function onUsernameInput() {
+      const raw = document.getElementById('usernameInput').value.toLowerCase().replace(/[^a-z0-9_]/g, '');
+      document.getElementById('usernameInput').value = raw;
+
+      const previewEl = document.getElementById('previewAddress');
+      const statusEl = document.getElementById('usernameStatus');
+      const submitBtn = document.getElementById('submitBtn');
+
+      if (raw.length < 3) {
+        previewEl.textContent = raw.length > 0 ? raw + '@brix.app' : '...@brix.app';
+        statusEl.textContent = raw.length > 0 ? 'Mínimo 3 caracteres' : '';
+        statusEl.style.color = 'var(--text-muted)';
+        submitBtn.disabled = true;
+        usernameAvailable = false;
+        return;
+      }
+
+      previewEl.textContent = raw + '@brix.app';
+      statusEl.textContent = 'Verificando...';
+      statusEl.style.color = 'var(--text-muted)';
+
+      if (usernameTimer) clearTimeout(usernameTimer);
+      usernameTimer = setTimeout(async () => {
+        try {
+          const resp = await fetch(`${API_BASE}/brix/check-username/${encodeURIComponent(raw)}`);
+          const data = await resp.json();
+          if (data.available) {
+            statusEl.textContent = '✓ Disponível';
+            statusEl.style.color = 'var(--green)';
+            submitBtn.disabled = false;
+            usernameAvailable = true;
+          } else {
+            statusEl.textContent = '✗ ' + (data.error || 'Já em uso');
+            statusEl.style.color = '#f87171';
+            submitBtn.disabled = true;
+            usernameAvailable = false;
+          }
+        } catch (e) {
+          statusEl.textContent = 'Erro de conexão';
+          statusEl.style.color = '#f87171';
+          submitBtn.disabled = true;
+          usernameAvailable = false;
+        }
+      }, 500);
+    }
+
+    function showError(msg) {
+      alert(msg);
+    }
+
+    async function submitRegistration() {
+      const submitBtn = document.getElementById('submitBtn');
+      const username = document.getElementById('usernameInput').value.toLowerCase().trim();
+
+      if (!usernameAvailable || username.length < 3) {
+        showError('Escolha um username disponível');
+        return;
+      }
+
+      let identifier;
+      if (currentType === 'phone') {
+        identifier = document.getElementById('phoneInput').value.trim();
+      } else {
+        identifier = document.getElementById('emailInput').value.trim();
+      }
+
+      if (!identifier) {
+        showError(currentType === 'phone' ? 'Informe seu celular' : 'Informe seu email');
+        return;
+      }
+
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Registrando...';
+
+      try {
+        const resp = await fetch(`${API_BASE}/brix/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: username,
+            identifier: identifier,
+            type: currentType,
+          }),
+        });
+
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          showError(data.error || 'Erro ao registrar');
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Criar meu BRIX →';
+          return;
+        }
+
+        currentUserId = data.user_id;
+        devCode = data.dev_code || null;
+
+        // Show verification step
+        document.getElementById('verifyDestination').textContent = identifier;
+        document.getElementById('step1').classList.add('hidden');
+        document.getElementById('step2').classList.remove('hidden');
+
+        // Show dev code hint if in dev mode
+        if (devCode) {
+          document.getElementById('devCodeHint').textContent = `Código DEV: ${devCode}`;
+          document.getElementById('devCodeHint').classList.remove('hidden');
+        }
+
+        // Focus first digit
+        document.querySelector('.brix-code-digit[data-index="0"]').focus();
+
+        // Start resend timer
+        startResendTimer();
+
+      } catch (err) {
+        showError('Erro de conexão com o servidor');
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Criar meu BRIX →';
+      }
+    }
+
+    function startResendTimer() {
+      resendCountdown = 45;
+      updateResendTimer();
+      if (timerInterval) clearInterval(timerInterval);
+      timerInterval = setInterval(() => {
+        resendCountdown--;
+        updateResendTimer();
+        if (resendCountdown <= 0) clearInterval(timerInterval);
+      }, 1000);
+    }
+
+    function updateResendTimer() {
+      const el = document.getElementById('resendTimer');
+      const link = document.getElementById('resendLink');
+      if (resendCountdown > 0) {
+        el.textContent = resendCountdown;
+        link.classList.remove('active');
+        link.onclick = null;
+      } else {
+        link.textContent = 'Reenviar código';
+        link.classList.add('active');
+        link.onclick = resendCode;
+      }
+    }
+
+    async function resendCode() {
+      if (!currentUserId) return;
+      try {
+        const resp = await fetch(`${API_BASE}/brix/resend`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: currentUserId }),
+        });
+        const data = await resp.json();
+        if (data.dev_code) {
+          devCode = data.dev_code;
+          document.getElementById('devCodeHint').textContent = `Código DEV: ${devCode}`;
+          document.getElementById('devCodeHint').classList.remove('hidden');
+        }
+        const link = document.getElementById('resendLink');
+        link.innerHTML = 'Reenviar código (<span id="resendTimer">45</span>s)';
+        startResendTimer();
+      } catch (err) {
+        showError('Erro ao reenviar código');
+      }
+    }
+
+    function onCodeInput(el) {
+      const val = el.value.replace(/\D/g, '');
+      el.value = val ? val[0] : '';
+
+      if (val) {
+        const idx = parseInt(el.dataset.index);
+        if (idx < 5) {
+          const next = document.querySelector(`.brix-code-digit[data-index="${idx + 1}"]`);
+          if (next) next.focus();
+        }
+      }
+
+      checkCodeComplete();
+    }
+
+    function onCodeKeydown(e, el) {
+      if (e.key === 'Backspace' && !el.value) {
+        const idx = parseInt(el.dataset.index);
+        if (idx > 0) {
+          const prev = document.querySelector(`.brix-code-digit[data-index="${idx - 1}"]`);
+          if (prev) { prev.focus(); prev.value = ''; }
+        }
+      }
+    }
+
+    function checkCodeComplete() {
+      const digits = document.querySelectorAll('.brix-code-digit');
+      let code = '';
+      digits.forEach(d => code += d.value);
+      document.getElementById('verifyBtn').disabled = code.length < 6;
+    }
+
+    async function verifyCode() {
+      const verifyBtn = document.getElementById('verifyBtn');
+      verifyBtn.disabled = true;
+      verifyBtn.textContent = 'Verificando...';
+
+      const digits = document.querySelectorAll('.brix-code-digit');
+      let code = '';
+      digits.forEach(d => code += d.value);
+
+      try {
+        const resp = await fetch(`${API_BASE}/brix/verify`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: currentUserId, code: code }),
+        });
+
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          showError(data.error || 'Código inválido');
+          verifyBtn.disabled = false;
+          verifyBtn.textContent = 'Verificar →';
+          return;
+        }
+
+        // Success!
+        document.getElementById('successAddress').textContent = data.brix_address;
+        document.getElementById('step2').classList.add('hidden');
+        document.getElementById('step3').classList.remove('hidden');
+
+        if (timerInterval) clearInterval(timerInterval);
+
+      } catch (err) {
+        showError('Erro de conexão');
+        verifyBtn.disabled = false;
+        verifyBtn.textContent = 'Verificar →';
+      }
+    }
+
+    function toggleMobileMenu() {
+      const menu = document.querySelector('.nav-mobile-menu');
+      if (menu) menu.classList.toggle('open');
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BRO — Escambo Digital via Nostr</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- NAV -->
+  <nav class="navbar">
+    <div class="nav-container">
+      <a href="#" class="nav-logo">BRO</a>
+      <div class="nav-links">
+        <a href="#about">O que é</a>
+        <a href="#how">Como funciona</a>
+        <a href="#brix" class="nav-brix">⚡ BRIX</a>
+        <a href="#app">App</a>
+        <a href="#why">Vantagens</a>
+        <a href="brix.html" class="btn-nav-cta">Criar meu BRIX</a>
+      </div>
+      <button class="nav-mobile-toggle" onclick="toggleMobileMenu()">☰</button>
+    </div>
+    <div class="nav-mobile-menu" id="mobileMenu">
+      <a href="#about">O que é</a>
+      <a href="#how">Como funciona</a>
+      <a href="#brix">⚡ BRIX</a>
+      <a href="#app">App</a>
+      <a href="#why">Vantagens</a>
+      <a href="brix.html" class="btn-nav-cta">Criar meu BRIX</a>
+    </div>
+  </nav>
+
+  <!-- HERO -->
+  <section class="hero">
+    <div class="hero-container">
+      <div class="hero-badge">Escambo Digital via Nostr</div>
+      <h1>BRO</h1>
+      <p class="hero-subtitle">O app de escambo digital via Nostr.<br>Comunidade de trocas simples, seguras e privadas.<br>Como um aperto de mão entre amigos.</p>
+      <div class="hero-buttons">
+        <a href="#" class="btn btn-primary">Baixar o App</a>
+        <a href="brix.html" class="btn btn-brix">⚡ Criar meu BRIX</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ABOUT -->
+  <section id="about" class="section">
+    <div class="container">
+      <h2>O que é o Bro?</h2>
+      <p class="section-text">Bro é um protocolo de aplicação P2P que permite pagar contas, fazer trocas e oferecer produtos e serviços usando Bitcoin via Lightning Network.</p>
+      <p class="section-text">Conecta quem tem Bitcoin e quer pagar contas ou contratar serviços com quem tem liquidez fiat e quer acumular sats, usando Nostr como protocolo de comunicação descentralizado. Sem servidores centralizados, sem KYC, sem intermediários.</p>
+    </div>
+  </section>
+
+  <!-- HOW IT WORKS -->
+  <section id="how" class="section section-dark">
+    <div class="container">
+      <h2>Como funciona o Bro?</h2>
+      <div class="cards-row">
+        <div class="card">
+          <div class="card-icon">👤</div>
+          <h3>USUÁRIO</h3>
+          <p>Tem bitcoin, quer pagar conta ou comprar produto ou serviço</p>
+        </div>
+        <div class="card-arrow">🤝</div>
+        <div class="card">
+          <div class="card-icon">💪</div>
+          <h3>BRO</h3>
+          <p>Oferece produtos/serviços ou tem liquidez fiat e quer acumular Bitcoin</p>
+        </div>
+        <div class="card-arrow">→</div>
+        <div class="card card-highlight">
+          <div class="card-icon">✅</div>
+          <h3>Resultado</h3>
+          <p>Usuário paga conta sem banco. Bro acumula sats. Sem intermediários.</p>
+        </div>
+      </div>
+      <div class="tech-badges">
+        <span class="badge">⚡ Lightning Network</span>
+        <span class="badge">🔑 Self-custodial</span>
+        <span class="badge">📡 Nostr</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== BRIX SECTION (NEW) ===== -->
+  <section id="brix" class="section section-brix">
+    <div class="container">
+      <div class="brix-header">
+        <div class="brix-logo-tag">NOVO</div>
+        <h2>⚡ BRIX</h2>
+        <p class="brix-tagline">Brix: o pix do Bro. Envie Bitcoin pelo seu email ou número de celular.</p>
+        <p class="section-text">Escolha seu apelido único, vincule seu celular ou email, e receba Bitcoin mesmo offline. Quando abrir o app, o saldo já está lá.</p>
+      </div>
+
+      <div class="brix-features">
+        <div class="brix-feature">
+          <div class="brix-feature-icon">⚡</div>
+          <h3>Seu Apelido Único</h3>
+          <p>Escolha um apelido como fulano@brix.app. Fácil de lembrar, fácil de compartilhar.</p>
+          <code class="brix-address-example">fulano@brix.app</code>
+        </div>
+        <div class="brix-feature">
+          <div class="brix-feature-icon">🔗</div>
+          <h3>Vincule Celular ou Email</h3>
+          <p>Seu celular e email ficam vinculados ao seu BRIX para verificação. O endereço é só o apelido.</p>
+          <code class="brix-address-example">maria@brix.app</code>
+        </div>
+        <div class="brix-feature">
+          <div class="brix-feature-icon">😴</div>
+          <h3>Receba Offline</h3>
+          <p>Não precisa estar com o app aberto. Os sats ficam guardados e aparecem quando você abrir a carteira.</p>
+        </div>
+      </div>
+
+      <div class="brix-how">
+        <h3>Como funciona?</h3>
+        <div class="brix-steps">
+          <div class="brix-step">
+            <div class="brix-step-number">1</div>
+            <div class="brix-step-content">
+              <h4>Escolha seu apelido</h4>
+              <p>Crie um nome único como fulano@brix.app e vincule seu celular ou email.</p>
+            </div>
+          </div>
+          <div class="brix-step">
+            <div class="brix-step-number">2</div>
+            <div class="brix-step-content">
+              <h4>Verifique com o código</h4>
+              <p>Receba um código de 6 dígitos via SMS ou email e confirme.</p>
+            </div>
+          </div>
+          <div class="brix-step">
+            <div class="brix-step-number">3</div>
+            <div class="brix-step-content">
+              <h4>Pronto! Receba Bitcoin</h4>
+              <p>Compartilhe seu endereço BRIX. Qualquer wallet Lightning pode te pagar.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="brix-cta">
+        <a href="brix.html" class="btn btn-brix-large">⚡ Criar meu BRIX agora</a>
+        <p class="brix-cta-sub">Grátis. Sem KYC. Sem cadastro bancário.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- APP SCREENSHOTS -->
+  <section id="app" class="section">
+    <div class="container">
+      <h2>Veja o App</h2>
+      <p class="section-text">Interface simples e intuitiva para escambo digital via Nostr</p>
+      <div class="app-screens">
+        <div class="app-screen">
+          <div class="phone-mockup">
+            <div class="phone-screen" style="background: linear-gradient(135deg, #1a1a2e, #16213e); display: flex; align-items: center; justify-content: center; color: #4ade80;">
+              <div style="text-align: center;">
+                <div style="font-size: 48px;">🔑</div>
+                <div style="margin-top: 12px; font-weight: 600;">Login</div>
+              </div>
+            </div>
+          </div>
+          <p>Login com chave Nostr</p>
+        </div>
+        <div class="app-screen">
+          <div class="phone-mockup">
+            <div class="phone-screen" style="background: linear-gradient(135deg, #1a1a2e, #16213e); display: flex; align-items: center; justify-content: center; color: #4ade80;">
+              <div style="text-align: center;">
+                <div style="font-size: 48px;">📋</div>
+                <div style="margin-top: 12px; font-weight: 600;">Marketplace</div>
+              </div>
+            </div>
+          </div>
+          <p>Marketplace P2P</p>
+        </div>
+        <div class="app-screen">
+          <div class="phone-mockup">
+            <div class="phone-screen" style="background: linear-gradient(135deg, #1a1a2e, #16213e); display: flex; align-items: center; justify-content: center; color: #4ade80;">
+              <div style="text-align: center;">
+                <div style="font-size: 48px;">✅</div>
+                <div style="margin-top: 12px; font-weight: 600;">Ordem Completa</div>
+              </div>
+            </div>
+          </div>
+          <p>Ordem completa</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- WHY -->
+  <section id="why" class="section section-dark">
+    <div class="container">
+      <h2>Por que usar o Bro?</h2>
+      <p class="section-text">Conecta pessoas e facilita a vida</p>
+      <div class="features-grid">
+        <div class="feature">
+          <h3>🔄 Troca Fácil</h3>
+          <p>Publique o que você tem, encontre o que quer. Simples assim.</p>
+        </div>
+        <div class="feature">
+          <h3>🔒 Seguro</h3>
+          <p>Trocas privadas via Nostr sem intermediários.</p>
+        </div>
+        <div class="feature">
+          <h3>🔑 Sem Custódia</h3>
+          <p>Troque e pague direto da sua carteira. Sem intermediários.</p>
+        </div>
+        <div class="feature">
+          <h3>🌐 Descentralizado</h3>
+          <p>Sem servidores centrais, você decide onde armazenar seus dados.</p>
+        </div>
+        <div class="feature">
+          <h3>📖 Open Source</h3>
+          <p>Código aberto e transparente para todos.</p>
+        </div>
+        <div class="feature">
+          <h3>🕶️ Privacidade</h3>
+          <p>Sem registro, sem telefone, sem informações pessoais.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="section section-cta">
+    <div class="container" style="text-align: center;">
+      <h2>Pronto para começar?</h2>
+      <p class="section-text">Quem tem Bro, tem tudo.</p>
+      <div class="hero-buttons">
+        <a href="#" class="btn btn-primary">Baixar o App</a>
+        <a href="brix.html" class="btn btn-brix">⚡ Criar meu BRIX</a>
+      </div>
+      <p class="disclaimer">Os fundos nunca ficam na custódia do Bro. O Bro não tem acesso a sua carteira.</p>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-content">
+        <div class="footer-logo">BRO</div>
+        <p>2026 Bro. Feito com 💚 para conectar pessoas.</p>
+        <div class="footer-links">
+          <a href="https://github.com/Brostr/bro">GitHub</a>
+          <a href="brix.html">BRIX</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    function toggleMobileMenu() {
+      document.getElementById('mobileMenu').classList.toggle('open');
+    }
+  </script>
+</body>
+</html>
