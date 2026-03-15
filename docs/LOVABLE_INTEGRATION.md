@@ -68,25 +68,54 @@ Página dedicada para o fluxo de registro BRIX. Tem 3 etapas visuais:
 **Subtítulo:** `Receba Bitcoin pelo celular ou email`
 
 **Formulário:**
+- Campo: `Username` (ex: maria_btc) — lowercase, 3-20 chars, letras/números/_
 - Toggle: `Telefone` | `Email`
 - Se Telefone: input com máscara de celular brasileiro (+55 padrão)
 - Se Email: input de email
-- Preview em tempo real: `Seu endereço será: 5511999887766@brix.app`
+- Preview em tempo real: `Seu endereço será: maria_btc@brix.brostr.app`
 - Botão: `Criar meu BRIX`
 
-**API call:** `POST /brix/register`
+**Validação em tempo real do username:**
+- Enquanto digita, chamar `GET /brix/check-username/{username}` (com debounce 500ms)
+- Mostrar ✅ verde se disponível, ❌ vermelho se já em uso
+- Bloquear botão se username indisponível
+
+**API call:** `POST https://brix.brostr.app/brix/register`
 ```json
 {
-  "identifier": "5511999887766",
-  "type": "phone",
-  "raw_value": "+5511999887766"
+  "username": "maria_btc",
+  "email": "maria@email.com"
+}
+```
+ou com telefone:
+```json
+{
+  "username": "maria_btc",
+  "phone": "+5511999887766"
 }
 ```
 
-### Etapa 2 — Verificação
+**Resposta (auto-verificado):**
+```json
+{
+  "success": true,
+  "verified": true,
+  "message": "BRIX criado e ativado!",
+  "user_id": "uuid",
+  "username": "maria_btc",
+  "brix_address": "maria_btc@brix.brostr.app"
+}
+```
+
+**Lógica do frontend:**
+- Se `response.verified === true` → **pular Etapa 2**, ir direto para Etapa 3 (Sucesso)
+- Se `response.verified === false` → mostrar Etapa 2 (verificação por código)
+- Se `response.error` → mostrar erro (ex: "Este username já está em uso")
+
+### Etapa 2 — Verificação (somente quando `verified === false`)
 
 **Título:** `Verificação`
-**Subtítulo:** `Enviamos um código para +55 11 99988-7766`
+**Subtítulo:** `Enviamos um código para seu email/celular`
 
 **Formulário:**
 - 6 inputs de dígito (auto-avança ao digitar)
@@ -97,20 +126,32 @@ Página dedicada para o fluxo de registro BRIX. Tem 3 etapas visuais:
 - Verificar: `POST /brix/verify` com `{ "user_id": "...", "code": "123456" }`
 - Reenviar: `POST /brix/resend` com `{ "user_id": "..." }`
 
-**Nota dev:** Quando o backend está em modo dev (sem Twilio), o código retorna no response da API como `dev_code`. Mostrar um hint sutil na tela.
-
 ### Etapa 3 — Sucesso
 
 **Título:** `✅ BRIX Ativado!`
 **Subtítulo:** `Seu endereço Lightning está pronto`
 
 **Conteúdo:**
-- Endereço BRIX grande e copiável: `5511999887766@brix.app`
-- Botão copiar
+- Endereço BRIX grande e copiável: `maria_btc@brix.brostr.app`
+- Botão copiar (clipboard API)
 - Botão compartilhar (Web Share API)
 - QR code do endereço
-- Link para baixar o app: "Baixe o Bro App para gerenciar seu BRIX"
-- Botões: App Store / Google Play (placeholders)
+
+### Botões de Download do Bro App:
+
+Após o BRIX ser criado, exibir uma seção destacada:
+
+**Texto:** `📲 Baixe o Bro App para usar seu BRIX`
+**Subtexto:** `Gerencie seu BRIX, receba pagamentos e acumule sats direto na sua carteira.`
+
+**Botões (lado a lado):**
+- 🤖 **Android** → `https://github.com/Quizzicarol/bro-releases/releases/latest/download/bro-latest.apk` (texto: "Baixar Android APK")
+- 🍎 **iOS TestFlight** → `https://testflight.apple.com/join/rkHbPQ94` (texto: "TestFlight iOS")
+
+**Estilo dos botões:**
+- Botões grandes com ícone do sistema (Android/Apple)
+- Cor principal amber/laranja (#F7931A)
+- Hover com brilho sutil
 
 ### Layout:
 - Lado esquerdo: formulário/etapas
@@ -133,23 +174,33 @@ Adicionar botão "⚡ Criar meu BRIX" nos seguintes lugares:
 
 O BRIX tem seu próprio backend Node.js separado do backend do Bro. 
 
-**URL de produção:** `https://brix.brostr.app` (a ser configurado)
-**URL de desenvolvimento:** `http://localhost:3100`
+**URL de produção:** `https://brix.brostr.app`
+**URL alternativa:** `https://brix.fly.dev`
 
 ### Endpoints principais:
 
 | Método | Path | Descrição |
 |--------|------|-----------|
 | GET | `/health` | Health check |
-| POST | `/brix/register` | Registrar phone/email |
-| POST | `/brix/verify` | Verificar código |
+| GET | `/brix/check-username/:username` | Verifica disponibilidade do username |
+| POST | `/brix/register` | Registrar username + phone/email |
+| POST | `/brix/verify` | Verificar código (quando `verified=false`) |
 | POST | `/brix/resend` | Reenviar código |
+| POST | `/brix/link-pubkey` | Vincular chave nostr a um BRIX |
 | GET | `/brix/address/:pubkey` | Buscar endereço BRIX de um pubkey |
 | GET | `/brix/history/:pubkey` | Histórico de pagamentos |
-| GET | `/brix/pending-payments?pubkey=...` | Pagamentos pendentes |
+| GET | `/brix/pending-payments` | Pagamentos pendentes (header x-nostr-pubkey) |
 | POST | `/brix/claim` | Reivindicar pagamento pendente |
 | GET | `/.well-known/lnurlp/:identifier` | LNURL-pay metadata (LUD-16) |
 | GET | `/lnurlp/:identifier/callback?amount=...` | Gerar invoice LNURL |
+
+### Erros comuns:
+
+| Código | Significado |
+|--------|-------------|
+| 400 | Dados inválidos (username curto, sem email/phone) |
+| 409 | Username ou email/phone já em uso por outro usuário verificado |
+| 404 | Usuário não encontrado |
 
 ### Headers:
 - `Content-Type: application/json`
