@@ -35,7 +35,7 @@ No new identifiers to learn. No addresses to bookmark. Just the phone number or 
 - 📱 **Use what you already know** — Your phone number or email becomes your payment address
 - 🔒 **Verified ownership** — SMS or email code ensures only you can register your contact info
 - 🌐 **Universal** — Works with any wallet that supports Lightning Addresses (Phoenix, Zeus, BlueWallet, Wallet of Satoshi, Breez, and more)
-- 🌍 **Web + App** — Register at [brix.brostr.app](https://brix.brostr.app) or inside the [Bro App](https://brostr.app)
+- 🌍 **Web + App** — Register at [brix.brostr.app](https://brix.brostr.app) or inside the [Bro App](https://www.brostr.app/#brix)
 - 🌎 **Multi-language** — Portuguese, English, and Spanish
 
 ---
@@ -65,7 +65,7 @@ Anyone can send you sats from any Lightning wallet. They just use the address BR
 
 BRIX is designed as a standalone service that any app can integrate. It implements [LUD-16](https://github.com/lnurl/luds/blob/luds/16.md) (Lightning Address) and exposes a simple REST API for registration and verification.
 
-Currently integrated with the [Bro App](https://brostr.app), but any application can connect to a BRIX server to offer Lightning Address services to its users.
+Currently integrated with the [Bro App](https://www.brostr.app/#brix), but any application can connect to a BRIX server to offer Lightning Address services to its users.
 
 ---
 
