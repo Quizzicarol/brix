@@ -1,73 +1,71 @@
-# ⚡ BRIX — Lightning Address for Everyone
+# ⚡ BRIX — Receive Bitcoin with your phone number or email
 
 <p align="center">
   <img src="https://img.shields.io/badge/Bitcoin-Lightning-orange?style=for-the-badge&logo=bitcoin" alt="Bitcoin Lightning" />
-  <img src="https://img.shields.io/badge/Nostr-Protocol-purple?style=for-the-badge" alt="Nostr" />
   <img src="https://img.shields.io/badge/Open_Source-MIT-green?style=for-the-badge" alt="MIT License" />
 </p>
 
-**BRIX** is a Lightning Address service that lets anyone receive Bitcoin instantly using a simple, human-readable address — like email, but for money.
+**BRIX** lets people receive Bitcoin using information they already know by heart — their phone number or email address. No new addresses to memorize, no QR codes to share, no invoices to generate.
 
-> `yourname@brix.brostr.app` → Receive sats instantly, anywhere in the world.
+> Your phone. Your email. Your Bitcoin.
 
 ---
 
-## 🚀 What is BRIX?
+## The Problem
 
-BRIX gives every user a **Lightning Address** — a simple identifier (like `alice@brix.brostr.app`) that anyone can use to send Bitcoin via the Lightning Network.
+Receiving Bitcoin on Lightning usually requires generating invoices, scanning QR codes, or sharing long addresses that no one can remember. These are technical barriers that keep normal people away from using Bitcoin in daily life.
 
-No complicated invoices. No QR codes. Just a name.
+## The Solution
+
+BRIX maps **your phone number or email** — things you already use every day — to a Lightning payment endpoint. When someone wants to send you sats, they just need the contact info you already share with everyone.
 
 ### How it works
 
-1. **Choose your username** → Pick a unique name like `alice`
-2. **Verify your contact** → Confirm via SMS or email
-3. **Done!** → Your Lightning Address `alice@brix.brostr.app` is active
+1. **Register with your phone or email** — the info you already know
+2. **Verify ownership** — a one-time code confirms it's really yours
+3. **Receive Bitcoin** — anyone can now send you sats using your contact info, from any Lightning wallet
 
-Now anyone can send you sats using just your address — from any Lightning wallet that supports [LNURL-pay](https://github.com/lnurl/luds).
+No new identifiers to learn. No addresses to bookmark. Just the phone number or email you already give to people.
 
 ---
 
 ## ✨ Features
 
-- ⚡ **Instant payments** — Receive Bitcoin in seconds via Lightning Network
-- 📧 **Human-readable addresses** — `yourname@brix.brostr.app` instead of long invoices
-- 🔒 **Verified accounts** — SMS or email verification ensures real ownership
-- 🌐 **Universal compatibility** — Works with any wallet that supports Lightning Addresses (Wallet of Satoshi, Phoenix, Zeus, Breez, BlueWallet, and more)
-- 📱 **Mobile app integration** — Built into the [Bro App](https://github.com/brostr/bro_app) for seamless experience
-- 🌍 **Web registration** — Create your BRIX at [brix.brostr.app](https://brix.brostr.app)
-- 🔑 **Nostr-native** — Linked to your Nostr identity for decentralized authentication
-- 🌎 **Multi-language** — Available in Portuguese, English, and Spanish
+- ⚡ **Instant** — Receive Bitcoin in seconds via Lightning Network
+- 📱 **Use what you already know** — Your phone number or email becomes your payment address
+- 🔒 **Verified ownership** — SMS or email code ensures only you can register your contact info
+- 🌐 **Universal** — Works with any wallet that supports Lightning Addresses (Phoenix, Zeus, BlueWallet, Wallet of Satoshi, Breez, and more)
+- 🌍 **Web + App** — Register at [brix.brostr.app](https://brix.brostr.app) or inside the [Bro App](https://brostr.app)
+- 🌎 **Multi-language** — Portuguese, English, and Spanish
 
 ---
 
-## 📱 For Users
+## Getting Started
 
-### Get your BRIX
+### Register
 
-**Option 1 — Via the Bro App:**
-1. Open the Bro App
-2. Go to the BRIX tab
-3. Enter your phone or email
-4. Choose your username
-5. Verify with the code sent to you
-6. Start receiving sats!
-
-**Option 2 — Via the website:**
+**Option 1 — Website:**
 1. Visit [brix.brostr.app](https://brix.brostr.app)
-2. Choose cell phone or email
-3. Pick your username
-4. Verify and activate
+2. Enter your phone number or email
+3. Pick a username
+4. Enter the verification code you receive
+5. Done — start receiving Bitcoin
 
-### Receive payments
+**Option 2 — Bro App:**
+1. Open the Bro App → BRIX tab
+2. Same flow — phone or email, username, verify
 
-Share your address with anyone:
+### Receiving payments
 
-```
-yourname@brix.brostr.app
-```
+Anyone can send you sats from any Lightning wallet. They just use the address BRIX generates from your registration (e.g., `username@brix.brostr.app`).
 
-They can paste it in any Lightning wallet and send you sats instantly.
+---
+
+## Integration
+
+BRIX is designed as a standalone service that any app can integrate. It implements [LUD-16](https://github.com/lnurl/luds/blob/luds/16.md) (Lightning Address) and exposes a simple REST API for registration and verification.
+
+Currently integrated with the [Bro App](https://brostr.app), but any application can connect to a BRIX server to offer Lightning Address services to its users.
 
 ---
 
@@ -88,8 +86,8 @@ They can paste it in any Lightning wallet and send you sats instantly.
               └───────────┘ └───────────┘
 ```
 
-- **BRIX Server** — Node.js + Express + SQLite
-- **LNURL-pay** — Implements [LUD-16](https://github.com/lnurl/luds/blob/luds/16.md) for Lightning Address resolution
+- **Server** — Node.js + Express + SQLite
+- **LNURL-pay** — [LUD-16](https://github.com/lnurl/luds/blob/luds/16.md) for Lightning Address resolution
 - **Verification** — SMS via Twilio Verify API, email via SMTP/Nodemailer
 - **Hosting** — Deployed on [Fly.io](https://fly.io)
 
@@ -97,7 +95,7 @@ They can paste it in any Lightning wallet and send you sats instantly.
 
 ## 🛠️ Self-hosting
 
-Want to run your own BRIX server with a custom domain?
+Run your own BRIX server with a custom domain.
 
 ### Prerequisites
 
@@ -109,7 +107,7 @@ Want to run your own BRIX server with a custom domain?
 ### Setup
 
 ```bash
-git clone https://github.com/brostr/brix.git
+git clone https://github.com/Quizzicarol/brix.git
 cd brix/server
 cp .env.example .env
 # Edit .env with your configuration
@@ -132,21 +130,9 @@ npm start
 
 ---
 
-## 🤝 Part of the Bro Ecosystem
-
-BRIX is the Lightning Address layer of the **Bro** ecosystem — a privacy-focused Bitcoin trading platform built on Nostr.
-
-- **Bro App** — P2P Bitcoin trading (buy/sell via Pix, bank transfer, etc.)
-- **BRIX** — Lightning Addresses for instant payments
-- **Nostr** — Decentralized identity and communication
-
----
-
 ## 📄 License
 
 MIT License — see [LICENSE](LICENSE) for details.
-
----
 
 <p align="center">
   <strong>⚡ Get your BRIX today at <a href="https://brix.brostr.app">brix.brostr.app</a></strong>
