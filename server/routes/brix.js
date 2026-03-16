@@ -122,19 +122,6 @@ router.post('/register', async (req, res) => {
     // Invalidate old verification codes
     db.prepare("UPDATE brix_verifications SET used = 1 WHERE user_id = ? AND used = 0").run(userId);
 
-    if (!hasSmtp) {
-      db.prepare("UPDATE brix_users SET verified = 1, updated_at = datetime('now') WHERE id = ?").run(userId);
-      console.log(`[BRIX] Auto-verificado (atualização, sem SMTP): ${cleanUsername}@${domain}`);
-      return res.json({
-        success: true,
-        verified: true,
-        message: 'BRIX criado e ativado!',
-        user_id: userId,
-        username: cleanUsername,
-        brix_address: `${cleanUsername}@${domain}`,
-      });
-    }
-
     // Generate new verification code
     const code = String(crypto.randomInt(100000, 999999));
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
@@ -148,6 +135,18 @@ router.post('/register', async (req, res) => {
     `).run(verificationId, userId, code, verifyVia, destination, expiresAt);
 
     console.log(`[BRIX] Código de verificação (re-registro) para ${destination}: ${code}`);
+
+    if (!hasSmtp) {
+      return res.json({
+        success: true,
+        verified: false,
+        message: 'Use o código de verificação',
+        user_id: userId,
+        username: cleanUsername,
+        verify_via: verifyVia,
+        dev_code: code,
+      });
+    }
 
     let emailSent = false;
     if (verifyVia === 'email' && cleanEmail) {
@@ -195,21 +194,17 @@ router.post('/register', async (req, res) => {
     }
   }
 
-  // Auto-verify when SMTP is not configured (no email service available)
+  // When SMTP is not configured, return dev_code so client shows verification step
   if (!hasSmtp) {
-    const tx = db.transaction(() => {
-      db.prepare('UPDATE brix_verifications SET used = 1 WHERE id = ?').run(verificationId);
-      db.prepare("UPDATE brix_users SET verified = 1, updated_at = datetime('now') WHERE id = ?").run(userId);
-    });
-    tx();
-    console.log(`[BRIX] Auto-verificado (sem SMTP): ${cleanUsername}@${domain}`);
+    console.log(`[BRIX] Sem SMTP — código dev: ${code} para ${cleanUsername}@${domain}`);
     return res.json({
       success: true,
-      verified: true,
-      message: 'BRIX criado e ativado!',
+      verified: false,
+      message: 'Use o código de verificação',
       user_id: userId,
       username: cleanUsername,
-      brix_address: `${cleanUsername}@${domain}`,
+      verify_via: verifyVia,
+      dev_code: code,
     });
   }
 
@@ -308,20 +303,14 @@ router.post('/resend', async (req, res) => {
     }
   }
 
-  // Auto-verify when SMTP is not configured
+  // When SMTP is not configured, return dev_code so client shows verification step
   if (!hasSmtp) {
-    const domain = process.env.BRIX_DOMAIN || 'brix.app';
-    const tx = db.transaction(() => {
-      db.prepare('UPDATE brix_verifications SET used = 1 WHERE id = ?').run(verificationId);
-      db.prepare("UPDATE brix_users SET verified = 1, updated_at = datetime('now') WHERE id = ?").run(user_id);
-    });
-    tx();
-    console.log(`[BRIX] Auto-verificado (resend, sem SMTP): ${user.username}@${domain}`);
+    console.log(`[BRIX] Sem SMTP — código dev (resend): ${code} para ${destination}`);
     return res.json({
       success: true,
-      verified: true,
-      message: 'BRIX ativado!',
-      brix_address: `${user.username}@${domain}`,
+      verified: false,
+      dev_code: code,
+      message: 'Use o código de verificação',
     });
   }
 
