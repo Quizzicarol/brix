@@ -2,26 +2,23 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const { getDb } = require('../models/database');
+const wallet = require('../services/wallet');
+const { calculateFee } = require('../services/fee');
 
-// Domain where the server is hosted (required for LNURL-pay callback URL)
 const DOMAIN = process.env.BRIX_DOMAIN || 'localhost:3100';
 const PROTOCOL = process.env.NODE_ENV === 'production' ? 'https' : 'http';
 
-// Min/max sendable in millisats
 const MIN_SENDABLE_MSATS = 1000;        // 1 sat
 const MAX_SENDABLE_MSATS = 1000000000;  // 1M sats
 
 /**
  * LUD-16: Lightning Address resolution
  * GET /.well-known/lnurlp/:identifier
- * 
- * Returns LNURL-pay metadata for the given identifier (phone, email, username)
  */
 router.get('/:identifier', (req, res) => {
   const { identifier } = req.params;
   const db = getDb();
 
-  // Look up verified user by username
   const user = db.prepare(
     'SELECT * FROM brix_users WHERE username = ? AND verified = 1'
   ).get(identifier);
@@ -33,34 +30,45 @@ router.get('/:identifier', (req, res) => {
     });
   }
 
-  // Build LNURL-pay response per LUD-06 / LUD-16
   const lnAddress = `${identifier}@${DOMAIN}`;
+  const feeEnabled = wallet.isEnabled();
+
+  const metadataText = feeEnabled
+    ? `Payment to ${lnAddress} (1% service fee)`
+    : `Payment to ${lnAddress}`;
+
   const metadata = JSON.stringify([
-    ['text/plain', `Payment to ${lnAddress}`],
+    ['text/plain', metadataText],
     ['text/identifier', lnAddress],
   ]);
 
   res.json({
     callback: `${PROTOCOL}://${DOMAIN}/lnurlp/${identifier}/callback`,
     maxSendable: MAX_SENDABLE_MSATS,
-    minSendable: MIN_SENDABLE_MSATS,
+    minSendable: feeEnabled ? Math.max(MIN_SENDABLE_MSATS, 2000) : MIN_SENDABLE_MSATS,
     metadata,
     tag: 'payRequest',
-    // LUD-12: comments allowed
     commentAllowed: 140,
   });
 });
 
 /**
- * LNURL-pay callback — generates a Lightning invoice for the payment
- * GET /lnurlp/:identifier/callback?amount=<msats>&comment=<text>
+ * LNURL-pay callback — with optional 1% fee collection.
+ *
+ * When fees are enabled (BRIX_FEE_ENABLED=true):
+ *   1. App generates invoice for NET amount (gross - 1%)
+ *   2. Server creates its OWN invoice for GROSS amount via wallet
+ *   3. Sender pays server invoice
+ *   4. Background forwarder pays app invoice (net), keeps fee
+ *
+ * When fees are disabled (default):
+ *   Same as before — app's invoice is returned directly to sender.
  */
 router.get('/:identifier/callback', async (req, res) => {
   const { identifier } = req.params;
   const { amount, comment } = req.query;
   const db = getDb();
 
-  // Validate amount
   const amountMsats = parseInt(amount, 10);
   if (!amountMsats || amountMsats < MIN_SENDABLE_MSATS || amountMsats > MAX_SENDABLE_MSATS) {
     return res.status(400).json({
@@ -69,100 +77,146 @@ router.get('/:identifier/callback', async (req, res) => {
     });
   }
 
-  // Verify user exists
   const user = db.prepare(
     'SELECT * FROM brix_users WHERE username = ? AND verified = 1'
   ).get(identifier);
 
   if (!user) {
-    return res.status(404).json({
-      status: 'ERROR',
-      reason: 'User not found',
-    });
+    return res.status(404).json({ status: 'ERROR', reason: 'User not found' });
   }
 
   try {
-    const amountSats = Math.floor(amountMsats / 1000);
+    const grossAmountSats = Math.floor(amountMsats / 1000);
     const lnAddress = `${identifier}@${DOMAIN}`;
+    const sanitizedComment = comment ? String(comment).slice(0, 140) : null;
 
-    // Create invoice request — the user's app will generate and submit the invoice
+    // ── Calculate fee (if enabled) ──
+    const feeEnabled = wallet.isEnabled();
+    let feeInfo = null;
+    let invoiceAmountSats = grossAmountSats;
+
+    if (feeEnabled) {
+      try {
+        feeInfo = calculateFee(grossAmountSats);
+        invoiceAmountSats = feeInfo.netAmountSats;
+      } catch (_) {
+        // Amount too small for fee — process without fee
+        feeInfo = null;
+      }
+    }
+
+    // ── Create invoice request (app sees this amount) ──
     const requestId = crypto.randomUUID();
     db.prepare(`
       INSERT INTO brix_invoice_requests (id, user_id, amount_sats, status)
       VALUES (?, ?, ?, 'pending')
-    `).run(requestId, user.id, amountSats);
+    `).run(requestId, user.id, invoiceAmountSats);
 
-    console.log(`[LNURL] Invoice request ${requestId} created for ${lnAddress}: ${amountSats} sats — waiting for app...`);
+    console.log(`[LNURL] Request ${requestId} for ${lnAddress}: ${invoiceAmountSats} sats` +
+      (feeInfo ? ` (gross: ${grossAmountSats}, fee: ${feeInfo.feeSats})` : '') +
+      ' — waiting for app...');
 
-    // Poll for the app to submit the invoice (max 25 seconds)
-    const startTime = Date.now();
-    const TIMEOUT_MS = 25000;
-    const POLL_INTERVAL = 500;
-
-    const pollForInvoice = () => {
-      return new Promise((resolve) => {
-        const check = () => {
-          const request = db.prepare(
-            `SELECT invoice FROM brix_invoice_requests WHERE id = ? AND status = 'ready'`
-          ).get(requestId);
-
-          if (request && request.invoice) {
-            resolve(request.invoice);
-            return;
-          }
-
-          if (Date.now() - startTime > TIMEOUT_MS) {
-            // Timeout — clean up
-            db.prepare(`UPDATE brix_invoice_requests SET status = 'expired' WHERE id = ?`).run(requestId);
-            resolve(null);
-            return;
-          }
-
-          setTimeout(check, POLL_INTERVAL);
-        };
-        check();
-      });
-    };
-
-    const invoice = await pollForInvoice();
+    // ── Poll for app to submit invoice ──
+    const invoice = await pollForInvoice(db, requestId);
 
     if (!invoice) {
-      console.log(`[LNURL] Invoice request ${requestId} timed out`);
-      return res.json({
-        status: 'ERROR',
-        reason: 'BRIX_RECIPIENT_OFFLINE',
-      });
+      console.log(`[LNURL] Request ${requestId} timed out`);
+      return res.json({ status: 'ERROR', reason: 'BRIX_RECIPIENT_OFFLINE' });
     }
 
-    // Record pending payment
+    // ═══ FEE PATH: HODL invoice → atomic forward ═══
+    if (feeInfo) {
+      try {
+        const hodl = await wallet.createHodlInvoice(
+          grossAmountSats,
+          `BRIX: ${lnAddress}`,
+        );
+
+        const feeId = crypto.randomUUID();
+        db.prepare(`
+          INSERT INTO brix_fee_transactions
+          (id, request_id, user_id, gross_amount_sats, fee_sats, net_amount_sats, fee_rate,
+           server_invoice, server_payment_hash, preimage, recipient_invoice, status)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+        `).run(feeId, requestId, user.id, grossAmountSats, feeInfo.feeSats,
+               feeInfo.netAmountSats, feeInfo.feeRate,
+               hodl.bolt11, hodl.paymentHash, hodl.preimage, invoice);
+
+        db.prepare(`UPDATE brix_invoice_requests SET status = 'completed' WHERE id = ?`).run(requestId);
+
+        console.log(`[LNURL] HODL invoice: ${grossAmountSats} → ${feeInfo.netAmountSats} net + ${feeInfo.feeSats} fee`);
+
+        return res.json({
+          pr: hodl.bolt11,
+          routes: [],
+          successAction: {
+            tag: 'message',
+            message: `Pagamento de ${grossAmountSats} sats enviado para ${lnAddress}!`,
+          },
+        });
+      } catch (walletErr) {
+        // Wallet failed — fall back to direct (no fee)
+        console.error(`[LNURL] Wallet error, falling back to direct: ${walletErr.message}`);
+      }
+    }
+
+    // ═══ DIRECT PATH (no fee / fallback) ═══
     const paymentId = crypto.randomUUID();
     const paymentHash = crypto.randomBytes(32).toString('hex');
-    const sanitizedComment = comment ? String(comment).slice(0, 140) : null;
     db.prepare(`
       INSERT INTO brix_pending_payments (id, user_id, amount_sats, payment_hash, sender_note)
       VALUES (?, ?, ?, ?, ?)
-    `).run(paymentId, user.id, amountSats, paymentHash, sanitizedComment);
+    `).run(paymentId, user.id, grossAmountSats, paymentHash, sanitizedComment);
 
-    // Mark request as completed
     db.prepare(`UPDATE brix_invoice_requests SET status = 'completed' WHERE id = ?`).run(requestId);
 
-    console.log(`[LNURL] Invoice relayed for ${lnAddress}: ${amountSats} sats`);
+    console.log(`[LNURL] Invoice relayed for ${lnAddress}: ${grossAmountSats} sats (direct)`);
 
-    res.json({
+    return res.json({
       pr: invoice,
       routes: [],
       successAction: {
         tag: 'message',
-        message: `Pagamento de ${amountSats} sats enviado para ${lnAddress}!`,
+        message: `Pagamento de ${grossAmountSats} sats enviado para ${lnAddress}!`,
       },
     });
   } catch (err) {
-    console.error('Error generating invoice:', err);
+    console.error('Error in LNURL callback:', err);
     res.status(500).json({
       status: 'ERROR',
       reason: 'Failed to generate invoice',
     });
   }
 });
+
+// ── Helper ──
+
+function pollForInvoice(db, requestId) {
+  const TIMEOUT_MS = 25000;
+  const POLL_INTERVAL = 500;
+  const startTime = Date.now();
+
+  return new Promise((resolve) => {
+    const check = () => {
+      const request = db.prepare(
+        `SELECT invoice FROM brix_invoice_requests WHERE id = ? AND status = 'ready'`
+      ).get(requestId);
+
+      if (request && request.invoice) {
+        resolve(request.invoice);
+        return;
+      }
+
+      if (Date.now() - startTime > TIMEOUT_MS) {
+        db.prepare(`UPDATE brix_invoice_requests SET status = 'expired' WHERE id = ?`).run(requestId);
+        resolve(null);
+        return;
+      }
+
+      setTimeout(check, POLL_INTERVAL);
+    };
+    check();
+  });
+}
 
 module.exports = router;
