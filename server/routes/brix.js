@@ -69,7 +69,7 @@ router.post('/register', async (req, res) => {
     const existingEmail = db.prepare('SELECT id, username, verified FROM brix_users WHERE email = ? AND username != ?').get(cleanEmail, cleanUsername);
     if (existingEmail) {
       if (existingEmail.verified) {
-        return res.status(409).json({ error: `Este email já está vinculado ao username "${existingEmail.username}"` });
+        return res.status(409).json({ error: 'Este email já está vinculado a outro username' });
       }
       // Clean up stale unverified entry with different username but same email
       db.prepare('DELETE FROM brix_verifications WHERE user_id = ?').run(existingEmail.id);
@@ -82,7 +82,7 @@ router.post('/register', async (req, res) => {
     const existingPhone = db.prepare('SELECT id, username, verified FROM brix_users WHERE phone = ? AND username != ?').get(cleanPhone, cleanUsername);
     if (existingPhone) {
       if (existingPhone.verified) {
-        return res.status(409).json({ error: `Este celular já está vinculado ao username "${existingPhone.username}"` });
+        return res.status(409).json({ error: 'Este celular já está vinculado a outro username' });
       }
       // Clean up stale unverified entry with different username but same phone
       db.prepare('DELETE FROM brix_verifications WHERE user_id = ?').run(existingPhone.id);
