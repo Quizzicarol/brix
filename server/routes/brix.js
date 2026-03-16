@@ -61,6 +61,24 @@ router.post('/register', async (req, res) => {
   // Check if username is already taken
   const existingUsername = db.prepare('SELECT id, verified, nostr_pubkey, email, phone FROM brix_users WHERE username = ?').get(cleanUsername);
   if (existingUsername && existingUsername.verified) {
+    // If the existing BRIX was created on the web (web_ pubkey) and the email matches,
+    // allow the app to claim it by updating the pubkey
+    if (existingUsername.nostr_pubkey.startsWith('web_') && cleanEmail && existingUsername.email === cleanEmail) {
+      const domain = process.env.BRIX_DOMAIN || 'brix.app';
+      db.prepare("UPDATE brix_users SET nostr_pubkey = ?, updated_at = datetime('now') WHERE id = ?").run(nostr_pubkey, existingUsername.id);
+      if (cleanPhone) {
+        db.prepare("UPDATE brix_users SET phone = ?, updated_at = datetime('now') WHERE id = ?").run(cleanPhone, existingUsername.id);
+      }
+      console.log(`[BRIX] Web BRIX claimed by app: ${cleanUsername}@${domain} -> ${nostr_pubkey.substring(0, 16)}...`);
+      return res.json({
+        success: true,
+        verified: true,
+        message: 'BRIX vinculado ao app!',
+        user_id: existingUsername.id,
+        username: cleanUsername,
+        brix_address: `${cleanUsername}@${domain}`,
+      });
+    }
     return res.status(409).json({ error: 'Este username já está em uso' });
   }
 
@@ -455,6 +473,29 @@ router.get('/address/:pubkey', (req, res) => {
 
   const domain = process.env.BRIX_DOMAIN || 'brix.app';
   res.json({ brix_address: `${user.username}@${domain}`, username: user.username, phone: user.phone, email: user.email });
+});
+
+/**
+ * GET /brix/find-by-email/:email
+ * Find a BRIX by email (used by app to find web-created BRIX)
+ */
+router.get('/find-by-email/:email', (req, res) => {
+  const email = req.params.email.trim().toLowerCase();
+  const db = getDb();
+  const user = db.prepare('SELECT username, phone, email, nostr_pubkey FROM brix_users WHERE email = ? AND verified = 1').get(email);
+
+  if (!user) {
+    return res.status(404).json({ error: 'Nenhum BRIX encontrado' });
+  }
+
+  const domain = process.env.BRIX_DOMAIN || 'brix.app';
+  res.json({
+    brix_address: `${user.username}@${domain}`,
+    username: user.username,
+    phone: user.phone,
+    email: user.email,
+    has_web_pubkey: user.nostr_pubkey.startsWith('web_'),
+  });
 });
 
 /**
