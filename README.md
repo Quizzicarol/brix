@@ -45,7 +45,7 @@ No new identifiers to learn. No addresses to bookmark. Just the phone number or 
 ### Register
 
 **Option 1 — Website:**
-1. Visit [brix.brostr.app](https://brix.brostr.app)
+1. Visit [brostr.app/#brix](https://www.brostr.app/#brix)
 2. Enter your phone number or email
 3. Pick a username
 4. Enter the verification code you receive
