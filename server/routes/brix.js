@@ -3,6 +3,7 @@ const router = express.Router();
 const crypto = require('crypto');
 const { getDb } = require('../models/database');
 const { sendVerificationCode } = require('../services/email');
+const { sendSmsVerificationCode } = require('../services/sms');
 
 /**
  * GET /brix/check-username/:username
@@ -109,6 +110,7 @@ router.post('/register', async (req, res) => {
   }
 
   const hasSmtp = !!process.env.SMTP_USER;
+  const hasSms = !!process.env.TWILIO_ACCOUNT_SID;
   const domain = process.env.BRIX_DOMAIN || 'brix.app';
 
   // If unverified entry exists with same username, update it instead of delete+recreate
@@ -136,32 +138,26 @@ router.post('/register', async (req, res) => {
 
     console.log(`[BRIX] Código de verificação (re-registro) para ${destination}: ${code}`);
 
-    if (!hasSmtp) {
-      return res.json({
-        success: true,
-        verified: false,
-        message: 'Use o código de verificação',
-        user_id: userId,
-        username: cleanUsername,
-        verify_via: verifyVia,
-        dev_code: code,
-      });
-    }
-
-    let emailSent = false;
-    if (verifyVia === 'email' && cleanEmail) {
-      try { emailSent = await sendVerificationCode(cleanEmail, code); } catch (err) {
+    let sent = false;
+    if (verifyVia === 'sms' && cleanPhone && hasSms) {
+      try { sent = await sendSmsVerificationCode(cleanPhone, code); } catch (err) {
+        console.error(`[BRIX] Erro ao enviar SMS: ${err.message}`);
+      }
+    } else if (verifyVia === 'email' && cleanEmail && hasSmtp) {
+      try { sent = await sendVerificationCode(cleanEmail, code); } catch (err) {
         console.error(`[BRIX] Erro ao enviar email: ${err.message}`);
       }
     }
 
+    const canSend = (verifyVia === 'sms' && hasSms) || (verifyVia === 'email' && hasSmtp);
     return res.json({
       success: true,
       verified: false,
-      message: emailSent ? 'Código enviado para seu email' : 'Erro ao enviar email',
+      message: sent ? (verifyVia === 'sms' ? 'Código enviado por SMS' : 'Código enviado para seu email') : (canSend ? 'Erro ao enviar código' : 'Use o código de verificação'),
       user_id: userId,
       username: cleanUsername,
       verify_via: verifyVia,
+      ...(!canSend && { dev_code: code }),
     });
   }
 
@@ -185,36 +181,34 @@ router.post('/register', async (req, res) => {
 
   console.log(`[BRIX] Código de verificação para ${destination}: ${code}`);
 
-  let emailSent = false;
-  if (verifyVia === 'email' && cleanEmail && hasSmtp) {
+  let sent = false;
+  if (verifyVia === 'sms' && cleanPhone && hasSms) {
     try {
-      emailSent = await sendVerificationCode(cleanEmail, code);
+      sent = await sendSmsVerificationCode(cleanPhone, code);
+    } catch (err) {
+      console.error(`[BRIX] Erro ao enviar SMS: ${err.message}`);
+    }
+  } else if (verifyVia === 'email' && cleanEmail && hasSmtp) {
+    try {
+      sent = await sendVerificationCode(cleanEmail, code);
     } catch (err) {
       console.error(`[BRIX] Erro ao enviar email: ${err.message}`);
     }
   }
 
-  // When SMTP is not configured, return dev_code so client shows verification step
-  if (!hasSmtp) {
-    console.log(`[BRIX] Sem SMTP — código dev: ${code} para ${cleanUsername}@${domain}`);
-    return res.json({
-      success: true,
-      verified: false,
-      message: 'Use o código de verificação',
-      user_id: userId,
-      username: cleanUsername,
-      verify_via: verifyVia,
-      dev_code: code,
-    });
+  const canSend = (verifyVia === 'sms' && hasSms) || (verifyVia === 'email' && hasSmtp);
+  if (!canSend) {
+    console.log(`[BRIX] Sem serviço configurado — código dev: ${code} para ${cleanUsername}@${domain}`);
   }
 
   res.json({
     success: true,
     verified: false,
-    message: emailSent ? 'Código enviado para seu email' : 'Erro ao enviar email',
+    message: sent ? (verifyVia === 'sms' ? 'Código enviado por SMS' : 'Código enviado para seu email') : (canSend ? 'Erro ao enviar código' : 'Use o código de verificação'),
     user_id: userId,
     username: cleanUsername,
     verify_via: verifyVia,
+    ...(!canSend && { dev_code: code }),
   });
 });
 
@@ -293,31 +287,30 @@ router.post('/resend', async (req, res) => {
   console.log(`[BRIX] Novo código para ${destination}: ${code}`);
 
   // Send email if verification is via email
-  let emailSent = false;
   const hasSmtp = !!process.env.SMTP_USER;
-  if (verifyVia === 'email' && user.email && hasSmtp) {
+  const hasSms = !!process.env.TWILIO_ACCOUNT_SID;
+
+  let sent = false;
+  if (verifyVia === 'sms' && user.phone && hasSms) {
     try {
-      emailSent = await sendVerificationCode(user.email, code);
+      sent = await sendSmsVerificationCode(user.phone, code);
+    } catch (err) {
+      console.error(`[BRIX] Erro ao reenviar SMS: ${err.message}`);
+    }
+  } else if (verifyVia === 'email' && user.email && hasSmtp) {
+    try {
+      sent = await sendVerificationCode(user.email, code);
     } catch (err) {
       console.error(`[BRIX] Erro ao reenviar email: ${err.message}`);
     }
   }
 
-  // When SMTP is not configured, return dev_code so client shows verification step
-  if (!hasSmtp) {
-    console.log(`[BRIX] Sem SMTP — código dev (resend): ${code} para ${destination}`);
-    return res.json({
-      success: true,
-      verified: false,
-      dev_code: code,
-      message: 'Use o código de verificação',
-    });
-  }
-
+  const canSend = (verifyVia === 'sms' && hasSms) || (verifyVia === 'email' && hasSmtp);
   res.json({
     success: true,
     verified: false,
-    message: emailSent ? 'Novo código enviado para seu email' : 'Erro ao reenviar',
+    message: sent ? (verifyVia === 'sms' ? 'Novo código enviado por SMS' : 'Novo código enviado para seu email') : (canSend ? 'Erro ao reenviar' : 'Use o código de verificação'),
+    ...(!canSend && { dev_code: code }),
   });
 });
 
@@ -657,21 +650,30 @@ router.post('/update-contact', async (req, res) => {
 
   console.log(`[BRIX] Update-contact code for ${destination}: ${code}`);
 
-  let emailSent = false;
-  if (verifyVia === 'email' && cleanEmail) {
+  const hasSmtp = !!process.env.SMTP_USER;
+  const hasSms = !!process.env.TWILIO_ACCOUNT_SID;
+
+  let sent = false;
+  if (verifyVia === 'sms' && cleanPhone && hasSms) {
     try {
-      emailSent = await sendVerificationCode(cleanEmail, code);
+      sent = await sendSmsVerificationCode(cleanPhone, code);
+    } catch (err) {
+      console.error(`[BRIX] Erro ao enviar SMS: ${err.message}`);
+    }
+  } else if (verifyVia === 'email' && cleanEmail && hasSmtp) {
+    try {
+      sent = await sendVerificationCode(cleanEmail, code);
     } catch (err) {
       console.error(`[BRIX] Erro ao enviar email: ${err.message}`);
     }
   }
 
-  const hasSmtp = !!process.env.SMTP_USER;
+  const canSend = (verifyVia === 'sms' && hasSms) || (verifyVia === 'email' && hasSmtp);
   res.json({
     success: true,
-    message: emailSent ? 'Código enviado para o novo email' : (hasSmtp ? 'Erro ao enviar email' : 'Código gerado (DEV)'),
+    message: sent ? (verifyVia === 'sms' ? 'Código enviado por SMS' : 'Código enviado para o novo email') : (canSend ? 'Erro ao enviar código' : 'Código gerado (DEV)'),
     verify_via: verifyVia,
-    ...(!hasSmtp && { dev_code: code }),
+    ...(!canSend && { dev_code: code }),
   });
 });
 
