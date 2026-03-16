@@ -520,8 +520,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             username: username,
-            identifier: identifier,
-            type: currentType,
+            ...(currentType === 'phone' ? { phone: identifier } : { email: identifier }),
           }),
         });
 
