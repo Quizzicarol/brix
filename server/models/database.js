@@ -61,10 +61,34 @@ function initialize() {
       updated_at  TEXT DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS brix_fee_transactions (
+      id                  TEXT PRIMARY KEY,
+      request_id          TEXT,
+      user_id             TEXT REFERENCES brix_users(id),
+      gross_amount_sats   INTEGER NOT NULL,
+      fee_sats            INTEGER NOT NULL,
+      net_amount_sats     INTEGER NOT NULL,
+      fee_rate            REAL NOT NULL,
+      server_invoice      TEXT,
+      server_payment_hash TEXT,
+      preimage            TEXT,
+      recipient_invoice   TEXT,
+      status              TEXT DEFAULT 'pending'
+                          CHECK(status IN ('pending','held','forwarding','forwarded','cancelled','expired')),
+      forward_attempts    INTEGER DEFAULT 0,
+      forward_hash        TEXT,
+      error               TEXT,
+      created_at          TEXT DEFAULT (datetime('now')),
+      paid_at             TEXT,
+      forwarded_at        TEXT
+    );
+
     CREATE INDEX IF NOT EXISTS idx_users_username ON brix_users(username);
     CREATE INDEX IF NOT EXISTS idx_users_pubkey ON brix_users(nostr_pubkey);
     CREATE INDEX IF NOT EXISTS idx_pending_user ON brix_pending_payments(user_id, status);
     CREATE INDEX IF NOT EXISTS idx_pending_hash ON brix_pending_payments(payment_hash);
+    CREATE INDEX IF NOT EXISTS idx_fee_status ON brix_fee_transactions(status);
+    CREATE INDEX IF NOT EXISTS idx_fee_server_hash ON brix_fee_transactions(server_payment_hash);
   `);
 
   console.log('BRIX database initialized');

@@ -7,6 +7,7 @@ const rateLimit = require('express-rate-limit');
 const db = require('./models/database');
 const lnurlRoutes = require('./routes/lnurl');
 const brixRoutes = require('./routes/brix');
+const paymentForwarder = require('./services/payment-forward');
 
 const app = express();
 const PORT = process.env.PORT || 3100;
@@ -41,6 +42,13 @@ app.use('/lnurlp', lnurlRoutes);
 // BRIX app routes (authenticated)
 app.use('/brix', brixRoutes);
 
+// Wallet webhook — wallet providers call this when a server invoice is paid
+app.post('/wallet/webhook', (req, res) => {
+  const { payment_hash } = req.body;
+  paymentForwarder.handleWebhook(payment_hash);
+  res.json({ ok: true });
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'brix-server', version: '0.1.0' });
@@ -48,6 +56,9 @@ app.get('/health', (req, res) => {
 
 // Initialize database and start
 db.initialize();
+
+// Start fee payment forwarder (only runs if BRIX_FEE_ENABLED=true)
+paymentForwarder.start();
 
 app.listen(PORT, HOST, () => {
   console.log(`BRIX server running on http://${HOST}:${PORT}`);

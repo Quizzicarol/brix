@@ -772,4 +772,59 @@ router.post('/confirm-update', async (req, res) => {
   });
 });
 
+// ─── Fee administration ───
+
+/**
+ * GET /brix/fee-stats
+ * Returns fee collection summary. Protected by admin key.
+ */
+router.get('/fee-stats', (req, res) => {
+  const adminKey = req.headers['x-admin-key'];
+  if (!adminKey || adminKey !== process.env.BRIX_ADMIN_KEY) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const db = getDb();
+
+  const stats = db.prepare(`
+    SELECT
+      COUNT(*) as total_transactions,
+      SUM(CASE WHEN status = 'forwarded' THEN 1 ELSE 0 END) as completed,
+      SUM(CASE WHEN status IN ('cancelled') THEN 1 ELSE 0 END) as cancelled_refunded,
+      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+      SUM(CASE WHEN status = 'held' THEN 1 ELSE 0 END) as held_not_forwarded,
+      SUM(CASE WHEN status = 'expired' THEN 1 ELSE 0 END) as expired,
+      SUM(CASE WHEN status = 'forwarded' THEN gross_amount_sats ELSE 0 END) as total_volume_sats,
+      SUM(CASE WHEN status = 'forwarded' THEN fee_sats ELSE 0 END) as total_fees_collected_sats,
+      SUM(CASE WHEN status = 'cancelled' THEN gross_amount_sats ELSE 0 END) as refunded_volume_sats
+    FROM brix_fee_transactions
+  `).get();
+
+  const recent = db.prepare(`
+    SELECT id, user_id, gross_amount_sats, fee_sats, net_amount_sats, status, created_at, forwarded_at, error
+    FROM brix_fee_transactions
+    ORDER BY created_at DESC LIMIT 20
+  `).all();
+
+  res.json({ stats, recent });
+});
+
+/**
+ * GET /brix/fee-failed
+ * Returns cancelled/stuck transactions. Protected by admin key.
+ */
+router.get('/fee-failed', (req, res) => {
+  const adminKey = req.headers['x-admin-key'];
+  if (!adminKey || adminKey !== process.env.BRIX_ADMIN_KEY) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const db = getDb();
+  const failed = db.prepare(`
+    SELECT * FROM brix_fee_transactions WHERE status IN ('cancelled', 'held') ORDER BY created_at DESC
+  `).all();
+
+  res.json({ failed, count: failed.length });
+});
+
 module.exports = router;
