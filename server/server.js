@@ -7,7 +7,6 @@ const rateLimit = require('express-rate-limit');
 const db = require('./models/database');
 const lnurlRoutes = require('./routes/lnurl');
 const brixRoutes = require('./routes/brix');
-const paymentForwarder = require('./services/payment-forward');
 
 const app = express();
 const PORT = process.env.PORT || 3100;
@@ -18,10 +17,17 @@ app.set('trust proxy', 1);
 
 // Security
 app.use(helmet({ contentSecurityPolicy: false }));
-app.use(cors());
+app.use(cors({
+  origin: [
+    'https://brix.brostr.app',
+    'https://www.brostr.app',
+    'https://brostr.app',
+  ],
+  methods: ['GET', 'POST'],
+}));
 app.use(express.json());
 
-// Rate limiting
+// Global rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 200,
@@ -29,6 +35,19 @@ const limiter = rateLimit({
   legacyHeaders: false,
 });
 app.use(limiter);
+
+// Strict rate limiting for registration and verification
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later' },
+});
+app.use('/brix/register', authLimiter);
+app.use('/brix/verify', authLimiter);
+app.use('/brix/resend', authLimiter);
+app.use('/brix/update-contact', authLimiter);
 
 // Serve static web frontend
 app.use(express.static(path.join(__dirname, '..', 'web')));
@@ -42,23 +61,13 @@ app.use('/lnurlp', lnurlRoutes);
 // BRIX app routes (authenticated)
 app.use('/brix', brixRoutes);
 
-// Wallet webhook — wallet providers call this when a server invoice is paid
-app.post('/wallet/webhook', (req, res) => {
-  const { payment_hash } = req.body;
-  paymentForwarder.handleWebhook(payment_hash);
-  res.json({ ok: true });
-});
-
 // Health check
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'brix-server', version: '0.1.0' });
+  res.json({ status: 'ok', service: 'brix-server', version: '0.2.0' });
 });
 
 // Initialize database and start
 db.initialize();
-
-// Start fee payment forwarder (only runs if BRIX_FEE_ENABLED=true)
-paymentForwarder.start();
 
 app.listen(PORT, HOST, () => {
   console.log(`BRIX server running on http://${HOST}:${PORT}`);
