@@ -28,7 +28,7 @@ async function tick() {
   const db = getDb();
   const hodlMode = wallet.isHodlMode();
 
-  // ── 1. Detect payments (pending → paid/held) ──
+  // ── 1. Detect fee payments (pending → paid/held) ──
   const pending = db.prepare(`
     SELECT * FROM brix_fee_transactions
     WHERE status = 'pending' AND created_at > datetime('now', '-1 hour')
@@ -139,6 +139,35 @@ async function tick() {
   if (stale.length > 0) {
     console.log(`[FEE] Expired ${stale.length} unpaid invoice(s)`);
   }
+
+  // ── 4. Track offline pending payments (pending_payment → received) ──
+  const offlinePending = db.prepare(`
+    SELECT * FROM brix_pending_payments
+    WHERE status = 'pending_payment' AND server_payment_hash IS NOT NULL
+      AND created_at > datetime('now', '-1 hour')
+  `).all();
+
+  for (const pp of offlinePending) {
+    try {
+      const paid = await wallet.checkInvoicePaid(pp.server_payment_hash);
+      if (paid) {
+        db.prepare(`UPDATE brix_pending_payments SET status = 'received' WHERE id = ?`).run(pp.id);
+        console.log(`[FEE] Offline payment confirmed: ${pp.amount_sats} sats (${pp.id.substring(0, 8)})`);
+      }
+    } catch (_) {
+      // retry next tick
+    }
+  }
+
+  // ── 5. Expire old unpaid offline payments ──
+  const expiredOffline = db.prepare(`
+    UPDATE brix_pending_payments
+    SET status = 'expired'
+    WHERE status = 'pending_payment' AND created_at < datetime('now', '-1 hour')
+  `).run();
+  if (expiredOffline.changes > 0) {
+    console.log(`[FEE] Expired ${expiredOffline.changes} unpaid offline payment(s)`);
+  }
 }
 
 function start() {
@@ -184,6 +213,19 @@ function handleWebhook(paymentHash) {
     console.log(`[FEE] Webhook: HODL held (tx ${tx.id.substring(0, 8)})`);
     return true;
   }
+
+  // Check offline pending payments
+  const pp = db.prepare(`
+    SELECT id FROM brix_pending_payments
+    WHERE server_payment_hash = ? AND status = 'pending_payment'
+  `).get(paymentHash);
+
+  if (pp) {
+    db.prepare(`UPDATE brix_pending_payments SET status = 'received' WHERE id = ?`).run(pp.id);
+    console.log(`[FEE] Webhook: Offline payment received (${pp.id.substring(0, 8)})`);
+    return true;
+  }
+
   return false;
 }
 

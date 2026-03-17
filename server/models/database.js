@@ -44,8 +44,12 @@ function initialize() {
       user_id         TEXT REFERENCES brix_users(id),
       amount_sats     INTEGER NOT NULL,
       payment_hash    TEXT NOT NULL,
-      status          TEXT DEFAULT 'received' CHECK(status IN ('received', 'forwarding', 'forwarded', 'expired')),
+      status          TEXT DEFAULT 'received' CHECK(status IN ('pending_payment', 'received', 'claiming', 'forwarding', 'forwarded', 'expired')),
       sender_note     TEXT,
+      server_invoice  TEXT,
+      server_payment_hash TEXT,
+      fee_sats        INTEGER DEFAULT 0,
+      net_amount_sats INTEGER,
       created_at      TEXT DEFAULT (datetime('now')),
       forwarded_at    TEXT,
       forward_hash    TEXT
@@ -91,6 +95,46 @@ function initialize() {
     CREATE INDEX IF NOT EXISTS idx_fee_server_hash ON brix_fee_transactions(server_payment_hash);
   `);
 
+  // Migration: add server wallet columns to brix_pending_payments for offline payments
+  try {
+    const ppInfo = conn.prepare(`SELECT sql FROM sqlite_master WHERE name = 'brix_pending_payments'`).get();
+    if (ppInfo && ppInfo.sql && !ppInfo.sql.includes('server_invoice')) {
+      console.log('[DB] Migrating brix_pending_payments: adding offline payment columns...');
+      conn.exec(`
+        ALTER TABLE brix_pending_payments RENAME TO brix_pending_payments_old;
+
+        CREATE TABLE brix_pending_payments (
+          id              TEXT PRIMARY KEY,
+          user_id         TEXT REFERENCES brix_users(id),
+          amount_sats     INTEGER NOT NULL,
+          payment_hash    TEXT NOT NULL,
+          status          TEXT DEFAULT 'received' CHECK(status IN ('pending_payment', 'received', 'claiming', 'forwarding', 'forwarded', 'expired')),
+          sender_note     TEXT,
+          server_invoice  TEXT,
+          server_payment_hash TEXT,
+          fee_sats        INTEGER DEFAULT 0,
+          net_amount_sats INTEGER,
+          created_at      TEXT DEFAULT (datetime('now')),
+          forwarded_at    TEXT,
+          forward_hash    TEXT
+        );
+
+        INSERT INTO brix_pending_payments (id, user_id, amount_sats, payment_hash, status, sender_note, created_at, forwarded_at, forward_hash)
+        SELECT id, user_id, amount_sats, payment_hash, status, sender_note, created_at, forwarded_at, forward_hash
+        FROM brix_pending_payments_old;
+
+        DROP TABLE brix_pending_payments_old;
+
+        CREATE INDEX IF NOT EXISTS idx_pending_user ON brix_pending_payments(user_id, status);
+        CREATE INDEX IF NOT EXISTS idx_pending_hash ON brix_pending_payments(payment_hash);
+        CREATE INDEX IF NOT EXISTS idx_pending_server_hash ON brix_pending_payments(server_payment_hash);
+      `);
+      console.log('[DB] Migration complete');
+    }
+  } catch (migrationErr) {
+    // Table might not exist yet (fresh install)
+  }
+
   // Migration: add 'paid' and 'failed' statuses to existing brix_fee_transactions
   try {
     const tableInfo = conn.prepare(`SELECT sql FROM sqlite_master WHERE name = 'brix_fee_transactions'`).get();
@@ -131,6 +175,13 @@ function initialize() {
     }
   } catch (migrationErr) {
     // Table might not exist yet (fresh install), ignore
+  }
+
+  // Create indexes that depend on migrated columns (safe to run after migrations)
+  try {
+    conn.exec(`CREATE INDEX IF NOT EXISTS idx_pending_server_hash ON brix_pending_payments(server_payment_hash);`);
+  } catch (_) {
+    // Index may already exist
   }
 
   console.log('BRIX database initialized');
