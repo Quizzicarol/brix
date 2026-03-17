@@ -120,7 +120,47 @@ router.get('/:identifier/callback', async (req, res) => {
     const invoice = await pollForInvoice(db, requestId);
 
     if (!invoice) {
-      console.log(`[LNURL] Request ${requestId} timed out`);
+      // ═══ OFFLINE PATH: Accept payment via server wallet ═══
+      if (wallet.isEnabled()) {
+        try {
+          console.log(`[LNURL] Request ${requestId} timed out — creating server invoice for offline delivery`);
+
+          const serverInvoice = await wallet.createInvoice(
+            grossAmountSats,
+            `BRIX: ${lnAddress} (offline)`,
+          );
+
+          const feeSats = feeInfo ? feeInfo.feeSats : 0;
+          const netSats = feeInfo ? feeInfo.netAmountSats : grossAmountSats;
+          const paymentId = crypto.randomUUID();
+
+          db.prepare(`
+            INSERT INTO brix_pending_payments
+            (id, user_id, amount_sats, payment_hash, status, sender_note,
+             server_invoice, server_payment_hash, fee_sats, net_amount_sats)
+            VALUES (?, ?, ?, ?, 'pending_payment', ?, ?, ?, ?, ?)
+          `).run(paymentId, user.id, grossAmountSats, serverInvoice.paymentHash,
+                 sanitizedComment, serverInvoice.bolt11, serverInvoice.paymentHash,
+                 feeSats, netSats);
+
+          db.prepare(`UPDATE brix_invoice_requests SET status = 'completed' WHERE id = ?`).run(requestId);
+
+          console.log(`[LNURL] Offline invoice for ${lnAddress}: ${grossAmountSats} sats (fee: ${feeSats}, net: ${netSats})`);
+
+          return res.json({
+            pr: serverInvoice.bolt11,
+            routes: [],
+            successAction: {
+              tag: 'message',
+              message: `Pagamento de ${grossAmountSats} sats enviado para ${lnAddress}! Será entregue quando o destinatário ficar online.`,
+            },
+          });
+        } catch (walletErr) {
+          console.error(`[LNURL] Failed to create offline invoice: ${walletErr.message}`);
+        }
+      }
+
+      console.log(`[LNURL] Request ${requestId} timed out — no offline fallback available`);
       return res.json({ status: 'ERROR', reason: 'BRIX_RECIPIENT_OFFLINE' });
     }
 

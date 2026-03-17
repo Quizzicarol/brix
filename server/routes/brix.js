@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { getDb } = require('../models/database');
 const { sendVerificationCode } = require('../services/email');
 const { sendSmsVerification, checkSmsVerification } = require('../services/sms');
+const wallet = require('../services/wallet');
 
 /**
  * GET /brix/check-username/:username
@@ -362,13 +363,23 @@ router.get('/pending-payments', (req, res) => {
   }
 
   const payments = db.prepare(`
-    SELECT id, amount_sats, sender_note, created_at
+    SELECT id, amount_sats, fee_sats, net_amount_sats, sender_note, created_at
     FROM brix_pending_payments
     WHERE user_id = ? AND status = 'received'
     ORDER BY created_at DESC
   `).all(user.id);
 
-  res.json({ payments });
+  // Return net_amount_sats as the claim amount (what recipient gets)
+  const result = payments.map(p => ({
+    id: p.id,
+    amount_sats: p.net_amount_sats || p.amount_sats,
+    gross_amount_sats: p.amount_sats,
+    fee_sats: p.fee_sats || 0,
+    sender_note: p.sender_note,
+    created_at: p.created_at,
+  }));
+
+  res.json({ payments: result });
 });
 
 /**
@@ -400,10 +411,20 @@ router.post('/claim', async (req, res) => {
   }
 
   try {
-    db.prepare("UPDATE brix_pending_payments SET status = 'forwarding' WHERE id = ?").run(payment_id);
+    db.prepare("UPDATE brix_pending_payments SET status = 'claiming' WHERE id = ?").run(payment_id);
 
-    // TODO: Pay user invoice via Spark SDK when server wallet is configured
-    const forwardHash = crypto.randomBytes(32).toString('hex');
+    const amountToPay = payment.net_amount_sats || payment.amount_sats;
+    let forwardHash;
+
+    if (wallet.isEnabled()) {
+      // Pay recipient invoice from server wallet
+      const result = await wallet.payInvoice(invoice);
+      forwardHash = result.paymentHash;
+      console.log(`[BRIX] Claim paid: ${amountToPay} sats (fee kept: ${payment.fee_sats || 0})`);
+    } else {
+      // No wallet — mock forward
+      forwardHash = crypto.randomBytes(32).toString('hex');
+    }
 
     db.prepare(`
       UPDATE brix_pending_payments
@@ -413,7 +434,7 @@ router.post('/claim', async (req, res) => {
 
     res.json({
       success: true,
-      amount_sats: payment.amount_sats,
+      amount_sats: amountToPay,
       forward_hash: forwardHash,
     });
   } catch (err) {
