@@ -72,6 +72,13 @@ async function sendSmsVerification(to) {
   }
 
   const toFormatted = to.startsWith('+') ? to : `+${to}`;
+
+  // E.164: minimum 8 digits (country code + number), maximum 15
+  const digits = toFormatted.replace(/\D/g, '');
+  if (digits.length < 11 || digits.length > 15) {
+    console.error(`[SMS] Invalid phone number (${digits.length} digits): ${toFormatted}`);
+    return false;
+  }
   const result = await twilioRequest(
     `/v2/Services/${config.verifySid}/Verifications`,
     { To: toFormatted, Channel: 'sms' }
