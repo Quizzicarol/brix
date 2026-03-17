@@ -600,14 +600,21 @@ router.get('/resolve/:query', (req, res) => {
   // Try phone — normalize the same way registration does
   const rawPhone = query.replace(/\D/g, '');
   if (rawPhone.length >= 8) {
-    const normalizedPhone = normalizeBrazilianPhone(rawPhone).replace(/\D/g, '');
-    // Try normalized form first, then raw digits as fallback
-    user = db.prepare('SELECT username, nostr_pubkey FROM brix_users WHERE phone = ? AND verified = 1').get(normalizedPhone);
-    if (!user && normalizedPhone !== rawPhone) {
-      user = db.prepare('SELECT username, nostr_pubkey FROM brix_users WHERE phone = ? AND verified = 1').get(rawPhone);
+    // Build candidate list: raw, with +55 prefix (Brazilian local), and normalized
+    const candidates = new Set([rawPhone]);
+    // If user entered local BR number (10-11 digits without country code), try adding 55
+    if (rawPhone.length <= 11 && !rawPhone.startsWith('55')) {
+      candidates.add('55' + rawPhone);
+      // Also normalize the 55-prefixed version (adds mobile 9 digit if needed)
+      candidates.add(normalizeBrazilianPhone('55' + rawPhone).replace(/\D/g, ''));
     }
-    if (user) {
-      return res.json({ found: true, brix_address: `${user.username}@${domain}`, username: user.username, nostr_pubkey: user.nostr_pubkey, matched_by: 'phone' });
+    candidates.add(normalizeBrazilianPhone(rawPhone).replace(/\D/g, ''));
+
+    for (const candidate of candidates) {
+      user = db.prepare('SELECT username, nostr_pubkey FROM brix_users WHERE phone = ? AND verified = 1').get(candidate);
+      if (user) {
+        return res.json({ found: true, brix_address: `${user.username}@${domain}`, username: user.username, nostr_pubkey: user.nostr_pubkey, matched_by: 'phone' });
+      }
     }
   }
 
