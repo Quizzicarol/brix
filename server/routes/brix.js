@@ -3,7 +3,7 @@ const router = express.Router();
 const crypto = require('crypto');
 const { getDb } = require('../models/database');
 const { sendVerificationCode } = require('../services/email');
-const { sendSmsVerification, checkSmsVerification } = require('../services/sms');
+const { sendSmsVerification, checkSmsVerification, normalizeBrazilianPhone } = require('../services/sms');
 
 /**
  * GET /brix/check-username/:username
@@ -56,7 +56,9 @@ router.post('/register', async (req, res) => {
 
   const nostr_pubkey = bodyPubkey || req.headers['x-nostr-pubkey'] || `web_${crypto.randomBytes(16).toString('hex')}`;
   const db = getDb();
-  const cleanPhone = phone ? phone.replace(/\D/g, '') : null;
+  // Normalize phone: strip non-digits and auto-fix Brazilian mobile numbers
+  const rawPhone = phone ? phone.replace(/\D/g, '') : null;
+  const cleanPhone = rawPhone ? normalizeBrazilianPhone(rawPhone).replace(/\D/g, '') : null;
   const cleanEmail = email ? email.trim().toLowerCase() : null;
 
   // Check if username is already taken
@@ -684,7 +686,8 @@ router.post('/update-contact', async (req, res) => {
     return res.status(404).json({ error: 'Usuário não encontrado' });
   }
 
-  const cleanPhone = phone ? phone.replace(/\D/g, '') : null;
+  const rawPhone2 = phone ? phone.replace(/\D/g, '') : null;
+  const cleanPhone = rawPhone2 ? normalizeBrazilianPhone(rawPhone2).replace(/\D/g, '') : null;
   const cleanEmail = email ? email.trim().toLowerCase() : null;
   const verifyVia = cleanPhone ? 'sms' : 'email';
   const destination = cleanPhone || cleanEmail;
