@@ -791,8 +791,9 @@ router.get('/fee-stats', (req, res) => {
       COUNT(*) as total_transactions,
       SUM(CASE WHEN status = 'forwarded' THEN 1 ELSE 0 END) as completed,
       SUM(CASE WHEN status IN ('cancelled') THEN 1 ELSE 0 END) as cancelled_refunded,
+      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_needs_review,
       SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
-      SUM(CASE WHEN status = 'held' THEN 1 ELSE 0 END) as held_not_forwarded,
+      SUM(CASE WHEN status IN ('held','paid') THEN 1 ELSE 0 END) as held_not_forwarded,
       SUM(CASE WHEN status = 'expired' THEN 1 ELSE 0 END) as expired,
       SUM(CASE WHEN status = 'forwarded' THEN gross_amount_sats ELSE 0 END) as total_volume_sats,
       SUM(CASE WHEN status = 'forwarded' THEN fee_sats ELSE 0 END) as total_fees_collected_sats,
@@ -821,7 +822,7 @@ router.get('/fee-failed', (req, res) => {
 
   const db = getDb();
   const failed = db.prepare(`
-    SELECT * FROM brix_fee_transactions WHERE status IN ('cancelled', 'held') ORDER BY created_at DESC
+    SELECT * FROM brix_fee_transactions WHERE status IN ('cancelled', 'failed', 'held', 'paid') ORDER BY created_at DESC
   `).all();
 
   res.json({ failed, count: failed.length });
