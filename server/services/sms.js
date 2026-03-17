@@ -140,5 +140,55 @@ async function checkSmsVerification(to, code) {
   return false;
 }
 
-module.exports = { sendSmsVerification, checkSmsVerification, normalizeBrazilianPhone };
+/**
+ * Send email verification via Twilio Verify
+ * @param {string} to - Email address
+ * @returns {Promise<boolean>} true if sent successfully
+ */
+async function sendEmailVerification(to) {
+  const config = getTwilioConfig();
+  if (!config) {
+    console.log(`[EMAIL-TWILIO] (dev) Twilio not configured for ${to}`);
+    return false;
+  }
+
+  const result = await twilioRequest(
+    `/v2/Services/${config.verifySid}/Verifications`,
+    { To: to, Channel: 'email' }
+  );
+
+  if (result && result.status === 'pending') {
+    console.log(`[EMAIL-TWILIO] Verificação enviada para ${to} (SID: ${result.sid})`);
+    return true;
+  }
+
+  console.error(`[EMAIL-TWILIO] Erro ao enviar: ${result ? (result.message || JSON.stringify(result)) : 'null response'}`);
+  return false;
+}
+
+/**
+ * Check email verification code via Twilio Verify
+ * @param {string} to - Email address
+ * @param {string} code - 6-digit code
+ * @returns {Promise<boolean>} true if code is valid
+ */
+async function checkEmailVerification(to, code) {
+  const config = getTwilioConfig();
+  if (!config) return false;
+
+  const result = await twilioRequest(
+    `/v2/Services/${config.verifySid}/VerificationCheck`,
+    { To: to, Code: code }
+  );
+
+  if (result && result.status === 'approved') {
+    console.log(`[EMAIL-TWILIO] Código verificado para ${to}`);
+    return true;
+  }
+
+  console.log(`[EMAIL-TWILIO] Código inválido para ${to}: ${result ? result.status : 'null'}`);
+  return false;
+}
+
+module.exports = { sendSmsVerification, checkSmsVerification, sendEmailVerification, checkEmailVerification, normalizeBrazilianPhone };
 
