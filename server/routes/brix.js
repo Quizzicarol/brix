@@ -597,10 +597,15 @@ router.get('/resolve/:query', (req, res) => {
     }
   }
 
-  // Try phone (clean digits only, exact match)
-  const cleanPhone = query.replace(/\D/g, '');
-  if (cleanPhone.length >= 8) {
-    user = db.prepare('SELECT username, nostr_pubkey FROM brix_users WHERE phone = ? AND verified = 1').get(cleanPhone);
+  // Try phone — normalize the same way registration does
+  const rawPhone = query.replace(/\D/g, '');
+  if (rawPhone.length >= 8) {
+    const normalizedPhone = normalizeBrazilianPhone(rawPhone).replace(/\D/g, '');
+    // Try normalized form first, then raw digits as fallback
+    user = db.prepare('SELECT username, nostr_pubkey FROM brix_users WHERE phone = ? AND verified = 1').get(normalizedPhone);
+    if (!user && normalizedPhone !== rawPhone) {
+      user = db.prepare('SELECT username, nostr_pubkey FROM brix_users WHERE phone = ? AND verified = 1').get(rawPhone);
+    }
     if (user) {
       return res.json({ found: true, brix_address: `${user.username}@${domain}`, username: user.username, nostr_pubkey: user.nostr_pubkey, matched_by: 'phone' });
     }
