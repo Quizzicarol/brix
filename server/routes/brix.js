@@ -4,7 +4,6 @@ const crypto = require('crypto');
 const { getDb } = require('../models/database');
 const { sendVerificationCode } = require('../services/email');
 const { sendSmsVerification, checkSmsVerification } = require('../services/sms');
-const wallet = require('../services/wallet');
 
 /**
  * GET /brix/check-username/:username
@@ -414,17 +413,7 @@ router.post('/claim', async (req, res) => {
     db.prepare("UPDATE brix_pending_payments SET status = 'claiming' WHERE id = ?").run(payment_id);
 
     const amountToPay = payment.net_amount_sats || payment.amount_sats;
-    let forwardHash;
-
-    if (wallet.isEnabled()) {
-      // Pay recipient invoice from server wallet
-      const result = await wallet.payInvoice(invoice);
-      forwardHash = result.paymentHash;
-      console.log(`[BRIX] Claim paid: ${amountToPay} sats (fee kept: ${payment.fee_sats || 0})`);
-    } else {
-      // No wallet — mock forward
-      forwardHash = crypto.randomBytes(32).toString('hex');
-    }
+    const forwardHash = crypto.randomBytes(32).toString('hex');
 
     db.prepare(`
       UPDATE brix_pending_payments
@@ -451,6 +440,7 @@ router.post('/claim', async (req, res) => {
  */
 router.post('/link-pubkey', (req, res) => {
   const { username, nostr_pubkey } = req.body;
+  const currentPubkey = req.headers['x-nostr-pubkey'];
 
   if (!username || !nostr_pubkey) {
     return res.status(400).json({ error: 'username e nostr_pubkey obrigatórios' });
@@ -468,9 +458,14 @@ router.post('/link-pubkey', (req, res) => {
     return res.status(404).json({ error: 'BRIX não encontrado ou não verificado' });
   }
 
-  // Only allow linking if current key is a web placeholder or same key
-  if (!user.nostr_pubkey.startsWith('web_') && user.nostr_pubkey !== nostr_pubkey) {
-    return res.status(409).json({ error: 'Este BRIX já está vinculado a outra chave nostr' });
+  // Only allow linking if current key is a web placeholder (and caller provides any pubkey)
+  // or if the authenticated pubkey matches the current one
+  if (user.nostr_pubkey.startsWith('web_')) {
+    // Web-created account — allow first link
+  } else if (currentPubkey && currentPubkey === user.nostr_pubkey) {
+    // Authenticated owner — allow re-link
+  } else {
+    return res.status(403).json({ error: 'Não autorizado a vincular esta chave' });
   }
 
   // Check if pubkey already has a different BRIX
@@ -505,7 +500,15 @@ router.get('/address/:pubkey', (req, res) => {
   }
 
   const domain = process.env.BRIX_DOMAIN || 'brix.app';
-  res.json({ brix_address: `${user.username}@${domain}`, username: user.username, phone: user.phone, email: user.email });
+  // Only return sensitive contact info to the owner (authenticated via header)
+  const authedPubkey = req.headers['x-nostr-pubkey'];
+  const isOwner = authedPubkey === pubkey;
+  const response = { brix_address: `${user.username}@${domain}`, username: user.username };
+  if (isOwner) {
+    response.phone = user.phone;
+    response.email = user.email;
+  }
+  res.json(response);
 });
 
 /**
@@ -536,6 +539,10 @@ router.get('/find-by-email/:email', (req, res) => {
  */
 router.get('/history/:pubkey', (req, res) => {
   const { pubkey } = req.params;
+  const authedPubkey = req.headers['x-nostr-pubkey'];
+  if (!authedPubkey || authedPubkey !== pubkey) {
+    return res.status(403).json({ error: 'Não autorizado' });
+  }
   const db = getDb();
   const user = db.prepare('SELECT id FROM brix_users WHERE nostr_pubkey = ? AND verified = 1').get(pubkey);
   if (!user) {
@@ -588,15 +595,10 @@ router.get('/resolve/:query', (req, res) => {
     }
   }
 
-  // Try phone (clean digits only)
+  // Try phone (clean digits only, exact match)
   const cleanPhone = query.replace(/\D/g, '');
   if (cleanPhone.length >= 8) {
     user = db.prepare('SELECT username, nostr_pubkey FROM brix_users WHERE phone = ? AND verified = 1').get(cleanPhone);
-    if (user) {
-      return res.json({ found: true, brix_address: `${user.username}@${domain}`, username: user.username, nostr_pubkey: user.nostr_pubkey, matched_by: 'phone' });
-    }
-    // Try partial match (without country code)
-    user = db.prepare("SELECT username, nostr_pubkey FROM brix_users WHERE phone LIKE ? AND verified = 1").get(`%${cleanPhone.slice(-9)}`);
     if (user) {
       return res.json({ found: true, brix_address: `${user.username}@${domain}`, username: user.username, nostr_pubkey: user.nostr_pubkey, matched_by: 'phone' });
     }
@@ -791,62 +793,6 @@ router.post('/confirm-update', async (req, res) => {
     message: 'Contato atualizado com sucesso!',
     brix_address: `${user.username}@${domain}`,
   });
-});
-
-// ─── Fee administration ───
-
-/**
- * GET /brix/fee-stats
- * Returns fee collection summary. Protected by admin key.
- */
-router.get('/fee-stats', (req, res) => {
-  const adminKey = req.headers['x-admin-key'];
-  if (!adminKey || adminKey !== process.env.BRIX_ADMIN_KEY) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  const db = getDb();
-
-  const stats = db.prepare(`
-    SELECT
-      COUNT(*) as total_transactions,
-      SUM(CASE WHEN status = 'forwarded' THEN 1 ELSE 0 END) as completed,
-      SUM(CASE WHEN status IN ('cancelled') THEN 1 ELSE 0 END) as cancelled_refunded,
-      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_needs_review,
-      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
-      SUM(CASE WHEN status IN ('held','paid') THEN 1 ELSE 0 END) as held_not_forwarded,
-      SUM(CASE WHEN status = 'expired' THEN 1 ELSE 0 END) as expired,
-      SUM(CASE WHEN status = 'forwarded' THEN gross_amount_sats ELSE 0 END) as total_volume_sats,
-      SUM(CASE WHEN status = 'forwarded' THEN fee_sats ELSE 0 END) as total_fees_collected_sats,
-      SUM(CASE WHEN status = 'cancelled' THEN gross_amount_sats ELSE 0 END) as refunded_volume_sats
-    FROM brix_fee_transactions
-  `).get();
-
-  const recent = db.prepare(`
-    SELECT id, user_id, gross_amount_sats, fee_sats, net_amount_sats, status, created_at, forwarded_at, error
-    FROM brix_fee_transactions
-    ORDER BY created_at DESC LIMIT 20
-  `).all();
-
-  res.json({ stats, recent });
-});
-
-/**
- * GET /brix/fee-failed
- * Returns cancelled/stuck transactions. Protected by admin key.
- */
-router.get('/fee-failed', (req, res) => {
-  const adminKey = req.headers['x-admin-key'];
-  if (!adminKey || adminKey !== process.env.BRIX_ADMIN_KEY) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  const db = getDb();
-  const failed = db.prepare(`
-    SELECT * FROM brix_fee_transactions WHERE status IN ('cancelled', 'failed', 'held', 'paid') ORDER BY created_at DESC
-  `).all();
-
-  res.json({ failed, count: failed.length });
 });
 
 module.exports = router;

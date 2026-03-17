@@ -357,9 +357,22 @@ async function checkInvoicePaid(paymentHash) {
   return provider.checkInvoicePaid(paymentHash);
 }
 
+async function getWalletBalance() {
+  const config = getWalletConfig();
+  if (!config || config.provider !== 'lnbits') return null;
+  const result = await httpRequest(
+    `${config.walletUrl}/api/v1/wallet`,
+    'GET',
+    { 'X-Api-Key': config.invoiceKey },
+    null,
+  );
+  return { balance_msats: result.balance, name: result.name, url: config.walletUrl };
+}
+
 module.exports = {
   isEnabled, getMode, isHodlMode, generatePreimage,
   createInvoice, checkInvoicePaid,
   createHodlInvoice, settleHodlInvoice, cancelHodlInvoice,
   payInvoice, checkInvoiceHeld,
+  getWalletBalance,
 };
