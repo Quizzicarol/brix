@@ -15,15 +15,18 @@ function getTransporter() {
     return null;
   }
 
+  const isSecure = port === 465;
   transporter = nodemailer.createTransport({
     host,
     port,
-    secure: port === 465,
+    secure: isSecure,
     auth: { user, pass },
     tls: { rejectUnauthorized: false },
+    logger: true,
+    debug: true,
   });
 
-  console.log(`[EMAIL] SMTP configured: ${host}:${port} as ${user}`);
+  console.log(`[EMAIL] SMTP configured: ${host}:${port} (secure=${isSecure}) as ${user}`);
   return transporter;
 }
 
