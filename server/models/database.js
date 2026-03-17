@@ -74,7 +74,7 @@ function initialize() {
       preimage            TEXT,
       recipient_invoice   TEXT,
       status              TEXT DEFAULT 'pending'
-                          CHECK(status IN ('pending','held','forwarding','forwarded','cancelled','expired')),
+                          CHECK(status IN ('pending','paid','held','forwarding','forwarded','cancelled','failed','expired')),
       forward_attempts    INTEGER DEFAULT 0,
       forward_hash        TEXT,
       error               TEXT,
@@ -90,6 +90,48 @@ function initialize() {
     CREATE INDEX IF NOT EXISTS idx_fee_status ON brix_fee_transactions(status);
     CREATE INDEX IF NOT EXISTS idx_fee_server_hash ON brix_fee_transactions(server_payment_hash);
   `);
+
+  // Migration: add 'paid' and 'failed' statuses to existing brix_fee_transactions
+  try {
+    const tableInfo = conn.prepare(`SELECT sql FROM sqlite_master WHERE name = 'brix_fee_transactions'`).get();
+    if (tableInfo && tableInfo.sql && !tableInfo.sql.includes("'paid'")) {
+      console.log('[DB] Migrating brix_fee_transactions: adding paid/failed statuses...');
+      conn.exec(`
+        ALTER TABLE brix_fee_transactions RENAME TO brix_fee_transactions_old;
+
+        CREATE TABLE brix_fee_transactions (
+          id                  TEXT PRIMARY KEY,
+          request_id          TEXT,
+          user_id             TEXT REFERENCES brix_users(id),
+          gross_amount_sats   INTEGER NOT NULL,
+          fee_sats            INTEGER NOT NULL,
+          net_amount_sats     INTEGER NOT NULL,
+          fee_rate            REAL NOT NULL,
+          server_invoice      TEXT,
+          server_payment_hash TEXT,
+          preimage            TEXT,
+          recipient_invoice   TEXT,
+          status              TEXT DEFAULT 'pending'
+                              CHECK(status IN ('pending','paid','held','forwarding','forwarded','cancelled','failed','expired')),
+          forward_attempts    INTEGER DEFAULT 0,
+          forward_hash        TEXT,
+          error               TEXT,
+          created_at          TEXT DEFAULT (datetime('now')),
+          paid_at             TEXT,
+          forwarded_at        TEXT
+        );
+
+        INSERT INTO brix_fee_transactions SELECT * FROM brix_fee_transactions_old;
+        DROP TABLE brix_fee_transactions_old;
+
+        CREATE INDEX IF NOT EXISTS idx_fee_status ON brix_fee_transactions(status);
+        CREATE INDEX IF NOT EXISTS idx_fee_server_hash ON brix_fee_transactions(server_payment_hash);
+      `);
+      console.log('[DB] Migration complete');
+    }
+  } catch (migrationErr) {
+    // Table might not exist yet (fresh install), ignore
+  }
 
   console.log('BRIX database initialized');
 }

@@ -1,17 +1,24 @@
 /**
  * BRIX Server Wallet — provides Lightning invoice/payment for fee collection.
  *
- * Uses HODL invoices for atomic fee collection:
- *   1. Server creates HODL invoice for GROSS amount (locked, not settled)
- *   2. Server pays recipient invoice for NET amount
- *   3. On success → settle HODL invoice → server keeps fee
- *   4. On failure → cancel HODL invoice → sender refunded automatically
+ * Two modes:
+ *   REGULAR (default, works with any LNbits):
+ *     1. Server creates regular invoice for GROSS amount
+ *     2. Sender pays → money in server wallet
+ *     3. Server pays recipient NET amount, keeps fee
+ *
+ *   HODL (requires LND backend):
+ *     1. Server creates HODL invoice for GROSS amount (locked, not settled)
+ *     2. Server pays recipient invoice for NET amount
+ *     3. On success → settle HODL invoice → server keeps fee
+ *     4. On failure → cancel HODL invoice → sender refunded automatically
  *
  * Environment variables:
  *   BRIX_FEE_ENABLED=true         — enable fee collection
  *   WALLET_PROVIDER=lnbits|mock
+ *   WALLET_MODE=regular|hodl      — invoice mode (default: regular)
  *
- *   For LNbits (requires LND backend for HODL support):
+ *   For LNbits:
  *     WALLET_URL=https://your-lnbits.com
  *     LNBITS_INVOICE_KEY=<invoice/read key>
  *     LNBITS_ADMIN_KEY=<admin key>
@@ -23,6 +30,7 @@ const crypto = require('crypto');
 
 const FEE_ENABLED = process.env.BRIX_FEE_ENABLED === 'true';
 const WALLET_PROVIDER = process.env.WALLET_PROVIDER || 'mock';
+const WALLET_MODE = process.env.WALLET_MODE || 'regular';
 
 let walletConfig = null;
 
@@ -61,7 +69,7 @@ function getWalletConfig() {
       return false;
   }
 
-  console.log(`[WALLET] Provider: ${walletConfig.provider} (HODL mode)`);
+  console.log(`[WALLET] Provider: ${walletConfig.provider} (${WALLET_MODE} mode)`);
   return walletConfig;
 }
 
@@ -194,6 +202,34 @@ const lnbits = {
     // For HODL: "paid" means HTLC received and held (not yet settled)
     return result.paid === true || result.status === 'held';
   },
+
+  /**
+   * Create a regular invoice (works with any LNbits, no HODL needed).
+   */
+  async createInvoice(amountSats, memo) {
+    const config = getWalletConfig();
+    const result = await httpRequest(
+      `${config.walletUrl}/api/v1/payments`,
+      'POST',
+      { 'X-Api-Key': config.invoiceKey },
+      { out: false, amount: amountSats, memo },
+    );
+    return { bolt11: result.payment_request, paymentHash: result.payment_hash };
+  },
+
+  /**
+   * Check if a regular invoice has been paid (money in wallet).
+   */
+  async checkInvoicePaid(paymentHash) {
+    const config = getWalletConfig();
+    const result = await httpRequest(
+      `${config.walletUrl}/api/v1/payments/${encodeURIComponent(paymentHash)}`,
+      'GET',
+      { 'X-Api-Key': config.invoiceKey },
+      null,
+    );
+    return result.paid === true;
+  },
 };
 
 // ─── Mock provider ───
@@ -236,6 +272,23 @@ const mock = {
     const p = mockPayments.get(paymentHash);
     return p ? p.status === 'held' : false;
   },
+
+  async createInvoice(amountSats, memo) {
+    const paymentHash = crypto.randomBytes(32).toString('hex');
+    const bolt11 = `lnbcrt${amountSats}reg${paymentHash.substring(0, 20)}`;
+    mockPayments.set(paymentHash, { status: 'pending', amountSats });
+    console.log(`[WALLET:mock] Regular invoice: ${amountSats} sats (${paymentHash.substring(0, 16)}...)`);
+    setTimeout(() => {
+      const p = mockPayments.get(paymentHash);
+      if (p && p.status === 'pending') p.status = 'paid';
+    }, 2000);
+    return { bolt11, paymentHash };
+  },
+
+  async checkInvoicePaid(paymentHash) {
+    const p = mockPayments.get(paymentHash);
+    return p ? p.status === 'paid' : false;
+  },
 };
 
 // ─── Unified interface ───
@@ -250,6 +303,14 @@ function getProvider() {
 
 function isEnabled() {
   return !!getWalletConfig();
+}
+
+function getMode() {
+  return WALLET_MODE;
+}
+
+function isHodlMode() {
+  return WALLET_MODE === 'hodl';
 }
 
 async function createHodlInvoice(amountSats, memo) {
@@ -284,8 +345,21 @@ async function checkInvoiceHeld(paymentHash) {
   return provider.checkInvoiceHeld(paymentHash);
 }
 
+async function createInvoice(amountSats, memo) {
+  const provider = getProvider();
+  if (!provider) throw new Error('Wallet not configured');
+  return provider.createInvoice(amountSats, memo);
+}
+
+async function checkInvoicePaid(paymentHash) {
+  const provider = getProvider();
+  if (!provider) throw new Error('Wallet not configured');
+  return provider.checkInvoicePaid(paymentHash);
+}
+
 module.exports = {
-  isEnabled, generatePreimage,
+  isEnabled, getMode, isHodlMode, generatePreimage,
+  createInvoice, checkInvoicePaid,
   createHodlInvoice, settleHodlInvoice, cancelHodlInvoice,
   payInvoice, checkInvoiceHeld,
 };

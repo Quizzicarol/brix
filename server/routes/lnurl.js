@@ -124,13 +124,27 @@ router.get('/:identifier/callback', async (req, res) => {
       return res.json({ status: 'ERROR', reason: 'BRIX_RECIPIENT_OFFLINE' });
     }
 
-    // ═══ FEE PATH: HODL invoice → atomic forward ═══
+    // ═══ FEE PATH: Create server invoice → forward to recipient ═══
     if (feeInfo) {
       try {
-        const hodl = await wallet.createHodlInvoice(
-          grossAmountSats,
-          `BRIX: ${lnAddress}`,
-        );
+        let serverInvoice;
+        let preimage = null;
+
+        if (wallet.isHodlMode()) {
+          // HODL mode: atomic, sender refunded on failure
+          const hodl = await wallet.createHodlInvoice(
+            grossAmountSats,
+            `BRIX: ${lnAddress}`,
+          );
+          serverInvoice = { bolt11: hodl.bolt11, paymentHash: hodl.paymentHash };
+          preimage = hodl.preimage;
+        } else {
+          // Regular mode: simple invoice, works with any LNbits
+          serverInvoice = await wallet.createInvoice(
+            grossAmountSats,
+            `BRIX: ${lnAddress}`,
+          );
+        }
 
         const feeId = crypto.randomUUID();
         db.prepare(`
@@ -140,14 +154,14 @@ router.get('/:identifier/callback', async (req, res) => {
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
         `).run(feeId, requestId, user.id, grossAmountSats, feeInfo.feeSats,
                feeInfo.netAmountSats, feeInfo.feeRate,
-               hodl.bolt11, hodl.paymentHash, hodl.preimage, invoice);
+               serverInvoice.bolt11, serverInvoice.paymentHash, preimage, invoice);
 
         db.prepare(`UPDATE brix_invoice_requests SET status = 'completed' WHERE id = ?`).run(requestId);
 
-        console.log(`[LNURL] HODL invoice: ${grossAmountSats} → ${feeInfo.netAmountSats} net + ${feeInfo.feeSats} fee`);
+        console.log(`[LNURL] ${wallet.isHodlMode() ? 'HODL' : 'Regular'} invoice: ${grossAmountSats} → ${feeInfo.netAmountSats} net + ${feeInfo.feeSats} fee`);
 
         return res.json({
-          pr: hodl.bolt11,
+          pr: serverInvoice.bolt11,
           routes: [],
           successAction: {
             tag: 'message',
