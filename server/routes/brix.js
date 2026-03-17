@@ -2,7 +2,8 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const { getDb } = require('../models/database');
-const { sendSmsVerification, checkSmsVerification, sendEmailVerification, checkEmailVerification, normalizeBrazilianPhone } = require('../services/sms');
+const { sendVerificationCode } = require('../services/email');
+const { sendSmsVerification, checkSmsVerification, normalizeBrazilianPhone } = require('../services/sms');
 
 /**
  * GET /brix/check-username/:username
@@ -110,7 +111,8 @@ router.post('/register', async (req, res) => {
     }
   }
 
-  const hasTwilio = !!process.env.TWILIO_ACCOUNT_SID;
+  const hasSmtp = !!process.env.SMTP_USER;
+  const hasSms = !!process.env.TWILIO_ACCOUNT_SID;
   const domain = process.env.BRIX_DOMAIN || 'brix.app';
 
   // If unverified entry exists with same username, update it instead of delete+recreate
@@ -121,26 +123,49 @@ router.post('/register', async (req, res) => {
       WHERE id = ?
     `).run(cleanPhone, cleanEmail, nostr_pubkey, userId);
 
-    const verifyVia = cleanPhone ? 'sms' : 'email';
+    // Invalidate old verification codes
+    db.prepare("UPDATE brix_verifications SET used = 1 WHERE user_id = ? AND used = 0").run(userId);
 
-    // All verification via Twilio Verify (SMS or Email)
-    if (hasTwilio) {
+    const verifyVia = cleanPhone ? 'sms' : 'email';
+    const destination = cleanPhone || cleanEmail;
+
+    // For SMS: Twilio Verify generates & sends the code
+    // For email: we generate code and send via SMTP
+    if (verifyVia === 'sms' && hasSms) {
       let sent = false;
-      try {
-        sent = verifyVia === 'sms'
-          ? await sendSmsVerification(cleanPhone)
-          : await sendEmailVerification(cleanEmail);
-      } catch (err) {
-        console.error(`[BRIX] Erro ao enviar ${verifyVia}: ${err.message}`);
+      try { sent = await sendSmsVerification(cleanPhone); } catch (err) {
+        console.error(`[BRIX] Erro ao enviar SMS: ${err.message}`);
       }
       return res.json({
         success: true, verified: false,
-        message: sent ? (verifyVia === 'sms' ? 'Código enviado por SMS' : 'Código enviado para seu email') : `Erro ao enviar ${verifyVia}`,
-        user_id: userId, username: cleanUsername, verify_via: verifyVia,
+        message: sent ? 'Código enviado por SMS' : 'Erro ao enviar SMS',
+        user_id: userId, username: cleanUsername, verify_via: 'sms',
       });
     }
 
-    return res.status(500).json({ error: 'Serviço de verificação indisponível' });
+    const code = String(crypto.randomInt(100000, 999999));
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    const verificationId = crypto.randomUUID();
+    db.prepare(`
+      INSERT INTO brix_verifications (id, user_id, code, type, destination, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(verificationId, userId, code, verifyVia, destination, expiresAt);
+    console.log(`[BRIX] Código de verificação (re-registro) para ${destination}: ${code}`);
+
+    let sent = false;
+    if (verifyVia === 'email' && cleanEmail && hasSmtp) {
+      try { sent = await sendVerificationCode(cleanEmail, code); } catch (err) {
+        console.error(`[BRIX] Erro ao enviar email: ${err.message}`);
+      }
+    }
+
+    const canSend = hasSmtp;
+    return res.json({
+      success: true, verified: false,
+      message: sent ? 'Código enviado para seu email' : (canSend ? 'Erro ao enviar email' : 'Use o código de verificação'),
+      user_id: userId, username: cleanUsername, verify_via: verifyVia,
+      ...(!canSend && { dev_code: code }),
+    });
   }
 
   // New registration
@@ -151,25 +176,55 @@ router.post('/register', async (req, res) => {
   `).run(userId, cleanUsername, cleanPhone, cleanEmail, nostr_pubkey);
 
   const verifyVia = cleanPhone ? 'sms' : 'email';
+  const destination = cleanPhone || cleanEmail;
 
-  // All verification via Twilio Verify (SMS or Email)
-  if (hasTwilio) {
+  // For SMS: Twilio Verify generates & sends the code
+  if (verifyVia === 'sms' && hasSms) {
     let sent = false;
     try {
-      sent = verifyVia === 'sms'
-        ? await sendSmsVerification(cleanPhone)
-        : await sendEmailVerification(cleanEmail);
+      sent = await sendSmsVerification(cleanPhone);
     } catch (err) {
-      console.error(`[BRIX] Erro ao enviar ${verifyVia}: ${err.message}`);
+      console.error(`[BRIX] Erro ao enviar SMS: ${err.message}`);
     }
     return res.json({
       success: true, verified: false,
-      message: sent ? (verifyVia === 'sms' ? 'Código enviado por SMS' : 'Código enviado para seu email') : `Erro ao enviar ${verifyVia}`,
-      user_id: userId, username: cleanUsername, verify_via: verifyVia,
+      message: sent ? 'Código enviado por SMS' : 'Erro ao enviar SMS',
+      user_id: userId, username: cleanUsername, verify_via: 'sms',
     });
   }
 
-  res.status(500).json({ error: 'Serviço de verificação indisponível' });
+  // For email: we generate code and send via SMTP
+  const code = String(crypto.randomInt(100000, 999999));
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  const verificationId = crypto.randomUUID();
+
+  db.prepare(`
+    INSERT INTO brix_verifications (id, user_id, code, type, destination, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(verificationId, userId, code, verifyVia, destination, expiresAt);
+
+  console.log(`[BRIX] Código de verificação para ${destination}: ${code}`);
+
+  let sent = false;
+  if (cleanEmail && hasSmtp) {
+    try {
+      sent = await sendVerificationCode(cleanEmail, code);
+    } catch (err) {
+      console.error(`[BRIX] Erro ao enviar email: ${err.message}`);
+    }
+  }
+
+  const canSend = hasSmtp;
+  if (!canSend) {
+    console.log(`[BRIX] Sem SMTP — código dev: ${code} para ${cleanUsername}@${domain}`);
+  }
+
+  res.json({
+    success: true, verified: false,
+    message: sent ? 'Código enviado para seu email' : (canSend ? 'Erro ao enviar email' : 'Use o código de verificação'),
+    user_id: userId, username: cleanUsername, verify_via: verifyVia,
+    ...(!canSend && { dev_code: code }),
+  });
 });
 
 /**
@@ -189,21 +244,31 @@ router.post('/verify', async (req, res) => {
     return res.status(404).json({ error: 'Usuário não encontrado' });
   }
 
-  // Verify via Twilio Verify API (SMS or Email)
-  const verifyTarget = user.phone || user.email;
-  if (!verifyTarget || !process.env.TWILIO_ACCOUNT_SID) {
-    return res.status(500).json({ error: 'Serviço de verificação indisponível' });
+  // If user registered with phone, verify via Twilio Verify API
+  if (user.phone && !!process.env.TWILIO_ACCOUNT_SID) {
+    const valid = await checkSmsVerification(user.phone, code);
+    if (!valid) {
+      return res.status(400).json({ error: 'Código inválido ou expirado' });
+    }
+    db.prepare("UPDATE brix_users SET verified = 1, updated_at = datetime('now') WHERE id = ?").run(user_id);
+  } else {
+    // Email verification: check code in our database
+    const verification = db.prepare(`
+      SELECT * FROM brix_verifications
+      WHERE user_id = ? AND code = ? AND used = 0 AND expires_at > datetime('now')
+      ORDER BY created_at DESC LIMIT 1
+    `).get(user_id, code);
+
+    if (!verification) {
+      return res.status(400).json({ error: 'Código inválido ou expirado' });
+    }
+
+    const tx = db.transaction(() => {
+      db.prepare('UPDATE brix_verifications SET used = 1 WHERE id = ?').run(verification.id);
+      db.prepare("UPDATE brix_users SET verified = 1, updated_at = datetime('now') WHERE id = ?").run(user_id);
+    });
+    tx();
   }
-
-  const valid = user.phone
-    ? await checkSmsVerification(user.phone, code)
-    : await checkEmailVerification(user.email, code);
-
-  if (!valid) {
-    return res.status(400).json({ error: 'Código inválido ou expirado' });
-  }
-
-  db.prepare("UPDATE brix_users SET verified = 1, updated_at = datetime('now') WHERE id = ?").run(user_id);
 
   const domain = process.env.BRIX_DOMAIN || 'brix.app';
   console.log(`[BRIX] Endereço ativado: ${user.username}@${domain}`);
@@ -234,26 +299,50 @@ router.post('/resend', async (req, res) => {
   }
 
   const verifyVia = user.phone ? 'sms' : 'email';
-  const hasTwilio = !!process.env.TWILIO_ACCOUNT_SID;
+  const destination = user.phone || user.email;
+  const hasSmtp = !!process.env.SMTP_USER;
+  const hasSms = !!process.env.TWILIO_ACCOUNT_SID;
 
-  if (!hasTwilio) {
-    return res.status(500).json({ error: 'Serviço de verificação indisponível' });
+  // For SMS: Twilio Verify sends a new code
+  if (verifyVia === 'sms' && hasSms) {
+    let sent = false;
+    try {
+      sent = await sendSmsVerification(user.phone);
+    } catch (err) {
+      console.error(`[BRIX] Erro ao reenviar SMS: ${err.message}`);
+    }
+    return res.json({
+      success: true, verified: false,
+      message: sent ? 'Novo código enviado por SMS' : 'Erro ao reenviar SMS',
+    });
   }
+
+  // For email: generate code and send via SMTP
+  db.prepare("UPDATE brix_verifications SET used = 1 WHERE user_id = ? AND used = 0").run(user_id);
+  const code = String(crypto.randomInt(100000, 999999));
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  const verificationId = crypto.randomUUID();
+
+  db.prepare(`
+    INSERT INTO brix_verifications (id, user_id, code, type, destination, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(verificationId, user_id, code, verifyVia, destination, expiresAt);
+  console.log(`[BRIX] Novo código para ${destination}: ${code}`);
 
   let sent = false;
-  try {
-    sent = verifyVia === 'sms'
-      ? await sendSmsVerification(user.phone)
-      : await sendEmailVerification(user.email);
-  } catch (err) {
-    console.error(`[BRIX] Erro ao reenviar ${verifyVia}: ${err.message}`);
+  if (user.email && hasSmtp) {
+    try {
+      sent = await sendVerificationCode(user.email, code);
+    } catch (err) {
+      console.error(`[BRIX] Erro ao reenviar email: ${err.message}`);
+    }
   }
 
+  const canSend = hasSmtp;
   res.json({
     success: true, verified: false,
-    message: sent
-      ? (verifyVia === 'sms' ? 'Novo código enviado por SMS' : 'Novo código enviado para seu email')
-      : `Erro ao reenviar ${verifyVia}`,
+    message: sent ? 'Novo código enviado para seu email' : (canSend ? 'Erro ao reenviar' : 'Use o código de verificação'),
+    ...(!canSend && { dev_code: code }),
   });
 });
 
@@ -601,27 +690,55 @@ router.post('/update-contact', async (req, res) => {
   const cleanPhone = rawPhone2 ? normalizeBrazilianPhone(rawPhone2).replace(/\D/g, '') : null;
   const cleanEmail = email ? email.trim().toLowerCase() : null;
   const verifyVia = cleanPhone ? 'sms' : 'email';
+  const destination = cleanPhone || cleanEmail;
 
-  const hasTwilio = !!process.env.TWILIO_ACCOUNT_SID;
-  if (!hasTwilio) {
-    return res.status(500).json({ error: 'Serviço de verificação indisponível' });
+  // Invalidate old verification codes
+  db.prepare("UPDATE brix_verifications SET used = 1 WHERE user_id = ? AND used = 0").run(user.id);
+
+  const hasSmtp = !!process.env.SMTP_USER;
+  const hasSms = !!process.env.TWILIO_ACCOUNT_SID;
+
+  // For SMS: Twilio Verify sends the code
+  if (verifyVia === 'sms' && hasSms) {
+    let sent = false;
+    try {
+      sent = await sendSmsVerification(cleanPhone);
+    } catch (err) {
+      console.error(`[BRIX] Erro ao enviar SMS: ${err.message}`);
+    }
+    return res.json({
+      success: true,
+      message: sent ? 'Código enviado por SMS' : 'Erro ao enviar SMS',
+      verify_via: 'sms',
+    });
   }
+
+  // For email: generate code and send via SMTP
+  const code = String(crypto.randomInt(100000, 999999));
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  const verificationId = crypto.randomUUID();
+
+  db.prepare(`
+    INSERT INTO brix_verifications (id, user_id, code, type, destination, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(verificationId, user.id, code, verifyVia, destination, expiresAt);
+  console.log(`[BRIX] Update-contact code for ${destination}: ${code}`);
 
   let sent = false;
-  try {
-    sent = verifyVia === 'sms'
-      ? await sendSmsVerification(cleanPhone)
-      : await sendEmailVerification(cleanEmail);
-  } catch (err) {
-    console.error(`[BRIX] Erro ao enviar ${verifyVia}: ${err.message}`);
+  if (cleanEmail && hasSmtp) {
+    try {
+      sent = await sendVerificationCode(cleanEmail, code);
+    } catch (err) {
+      console.error(`[BRIX] Erro ao enviar email: ${err.message}`);
+    }
   }
 
+  const canSend = hasSmtp;
   res.json({
     success: true,
-    message: sent
-      ? (verifyVia === 'sms' ? 'Código enviado por SMS' : 'Código enviado para o novo email')
-      : `Erro ao enviar ${verifyVia}`,
+    message: sent ? 'Código enviado para o novo email' : (canSend ? 'Erro ao enviar email' : 'Código gerado (DEV)'),
     verify_via: verifyVia,
+    ...(!canSend && { dev_code: code }),
   });
 });
 
@@ -648,24 +765,29 @@ router.post('/confirm-update', async (req, res) => {
   const cleanPhone = phone ? phone.replace(/\D/g, '') : null;
   const cleanEmail = email ? email.trim().toLowerCase() : null;
 
-  // Verify via Twilio Verify API (SMS or Email)
-  const verifyTarget = cleanPhone || cleanEmail;
-  if (!verifyTarget || !process.env.TWILIO_ACCOUNT_SID) {
-    return res.status(500).json({ error: 'Serviço de verificação indisponível' });
-  }
-
-  const valid = cleanPhone
-    ? await checkSmsVerification(cleanPhone, code)
-    : await checkEmailVerification(cleanEmail, code);
-
-  if (!valid) {
-    return res.status(400).json({ error: 'Código inválido ou expirado' });
-  }
-
-  if (cleanPhone) {
+  // For SMS-based contact update: verify via Twilio Verify
+  if (cleanPhone && !!process.env.TWILIO_ACCOUNT_SID) {
+    const valid = await checkSmsVerification(cleanPhone, code);
+    if (!valid) {
+      return res.status(400).json({ error: 'Código inválido ou expirado' });
+    }
     db.prepare("UPDATE brix_users SET phone = ?, updated_at = datetime('now') WHERE id = ?").run(cleanPhone, user.id);
-  } else if (cleanEmail) {
-    db.prepare("UPDATE brix_users SET email = ?, updated_at = datetime('now') WHERE id = ?").run(cleanEmail, user.id);
+  } else {
+    // Email-based: check code in our database
+    const verification = db.prepare(`
+      SELECT * FROM brix_verifications
+      WHERE user_id = ? AND code = ? AND used = 0 AND expires_at > datetime('now')
+      ORDER BY created_at DESC LIMIT 1
+    `).get(user.id, code);
+
+    if (!verification) {
+      return res.status(400).json({ error: 'Código inválido ou expirado' });
+    }
+
+    db.prepare('UPDATE brix_verifications SET used = 1 WHERE id = ?').run(verification.id);
+    if (cleanEmail) {
+      db.prepare("UPDATE brix_users SET email = ?, updated_at = datetime('now') WHERE id = ?").run(cleanEmail, user.id);
+    }
   }
 
   const domain = process.env.BRIX_DOMAIN || 'brix.app';
