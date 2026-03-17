@@ -22,11 +22,9 @@ function getTransporter() {
     secure: isSecure,
     auth: { user, pass },
     tls: { rejectUnauthorized: false },
-    logger: true,
-    debug: true,
   });
 
-  console.log(`[EMAIL] SMTP configured: ${host}:${port} (secure=${isSecure}) as ${user}`);
+  console.log(`[EMAIL] SMTP configured: ${host}:${port} as ${user}`);
   return transporter;
 }
 
