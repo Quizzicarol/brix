@@ -2,6 +2,28 @@ const https = require('https');
 
 let twilioConfigured = null;
 
+/**
+ * Normalize Brazilian mobile phone numbers.
+ * Brazilian mobile numbers have 13 digits: +55 XX 9XXXX-XXXX
+ * Users often omit the 9th digit, entering +55 XX XXXX-XXXX (12 digits).
+ * This function auto-adds the mobile 9 prefix when needed.
+ */
+function normalizeBrazilianPhone(phone) {
+  const digits = phone.replace(/\D/g, '');
+  // Pattern: 55 + 2-digit area code + 8-digit number (12 digits total)
+  // The 8-digit number starts with 6-9 (mobile range)
+  if (digits.length === 12 && digits.startsWith('55')) {
+    const areaCode = digits.substring(2, 4);
+    const number = digits.substring(4);
+    if (/^[6-9]/.test(number)) {
+      const fixed = `+55${areaCode}9${number}`;
+      console.log(`[SMS] Auto-fixed BR mobile: +${digits} → ${fixed}`);
+      return fixed;
+    }
+  }
+  return phone.startsWith('+') ? phone : `+${phone}`;
+}
+
 function getTwilioConfig() {
   if (twilioConfigured !== null) return twilioConfigured;
 
@@ -71,9 +93,9 @@ async function sendSmsVerification(to) {
     return false;
   }
 
-  const toFormatted = to.startsWith('+') ? to : `+${to}`;
+  const toFormatted = normalizeBrazilianPhone(to);
 
-  // E.164: minimum 8 digits (country code + number), maximum 15
+  // E.164: minimum 11 digits (country code + number), maximum 15
   const digits = toFormatted.replace(/\D/g, '');
   if (digits.length < 11 || digits.length > 15) {
     console.error(`[SMS] Invalid phone number (${digits.length} digits): ${toFormatted}`);
@@ -103,7 +125,7 @@ async function checkSmsVerification(to, code) {
   const config = getTwilioConfig();
   if (!config) return false;
 
-  const toFormatted = to.startsWith('+') ? to : `+${to}`;
+  const toFormatted = normalizeBrazilianPhone(to);
   const result = await twilioRequest(
     `/v2/Services/${config.verifySid}/VerificationCheck`,
     { To: toFormatted, Code: code }
@@ -118,5 +140,5 @@ async function checkSmsVerification(to, code) {
   return false;
 }
 
-module.exports = { sendSmsVerification, checkSmsVerification };
+module.exports = { sendSmsVerification, checkSmsVerification, normalizeBrazilianPhone };
 
