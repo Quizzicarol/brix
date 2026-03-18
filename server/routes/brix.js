@@ -810,4 +810,32 @@ router.post('/confirm-update', async (req, res) => {
   });
 });
 
+/**
+ * POST /brix/register-push
+ * Body: { fcm_token }
+ * Header: x-nostr-pubkey
+ * Registers/updates the FCM push token for a user.
+ */
+router.post('/register-push', (req, res) => {
+  const pubkey = req.headers['x-nostr-pubkey'];
+  const { fcm_token } = req.body;
+
+  if (!pubkey) {
+    return res.status(401).json({ error: 'Missing x-nostr-pubkey header' });
+  }
+  if (!fcm_token || typeof fcm_token !== 'string' || fcm_token.length < 20) {
+    return res.status(400).json({ error: 'Invalid FCM token' });
+  }
+
+  const db = getDb();
+  const user = db.prepare('SELECT id FROM brix_users WHERE nostr_pubkey = ? AND verified = 1').get(pubkey);
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  db.prepare("UPDATE brix_users SET fcm_token = ?, updated_at = datetime('now') WHERE id = ?").run(fcm_token, user.id);
+  console.log(`[PUSH] FCM token registered for user ${user.id}`);
+  res.json({ success: true });
+});
+
 module.exports = router;

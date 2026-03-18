@@ -184,6 +184,18 @@ function initialize() {
     // Index may already exist
   }
 
+  // Migration: add fcm_token column to brix_users for push notifications
+  try {
+    const usersInfo = conn.prepare(`SELECT sql FROM sqlite_master WHERE name = 'brix_users'`).get();
+    if (usersInfo && usersInfo.sql && !usersInfo.sql.includes('fcm_token')) {
+      console.log('[DB] Migrating brix_users: adding fcm_token column...');
+      conn.exec(`ALTER TABLE brix_users ADD COLUMN fcm_token TEXT;`);
+      console.log('[DB] Migration complete: fcm_token added');
+    }
+  } catch (migrationErr) {
+    // Column may already exist
+  }
+
   console.log('BRIX database initialized');
 }
 

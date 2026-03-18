@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const { getDb } = require('../models/database');
+const { sendWakeUpPush } = require('../services/push');
 
 const DOMAIN = process.env.BRIX_DOMAIN || 'localhost:3100';
 const PROTOCOL = process.env.NODE_ENV === 'production' ? 'https' : 'http';
@@ -91,8 +92,20 @@ router.get('/:identifier/callback', async (req, res) => {
 
     console.log(`[LNURL] Request ${requestId} for ${lnAddress}: ${amountSats} sats (source=${source || 'external'}) — waiting for app...`);
 
-    // ── Poll for app to submit Spark invoice ──
-    const sparkInvoice = await pollForInvoice(db, requestId);
+    // ── First try: quick poll (app may already be online polling) ──
+    const QUICK_TIMEOUT = 8000;
+    let sparkInvoice = await pollForInvoice(db, requestId, QUICK_TIMEOUT);
+
+    // ── If no response, send push notification to wake up the app ──
+    if (!sparkInvoice) {
+      const pushSent = await sendWakeUpPush(user.id, requestId, amountSats);
+      if (pushSent) {
+        console.log(`[LNURL] Push sent to ${lnAddress}, extending timeout...`);
+        // Give app time to wake up and generate invoice (extra 30s)
+        const PUSH_TIMEOUT = 30000;
+        sparkInvoice = await pollForInvoice(db, requestId, PUSH_TIMEOUT);
+      }
+    }
 
     if (!sparkInvoice) {
       console.log(`[LNURL] Request ${requestId} timed out — recipient offline`);
@@ -123,8 +136,7 @@ router.get('/:identifier/callback', async (req, res) => {
 
 // ── Helper ──
 
-function pollForInvoice(db, requestId) {
-  const TIMEOUT_MS = 25000;
+function pollForInvoice(db, requestId, timeoutMs = 25000) {
   const POLL_INTERVAL = 500;
   const startTime = Date.now();
 
@@ -139,8 +151,7 @@ function pollForInvoice(db, requestId) {
         return;
       }
 
-      if (Date.now() - startTime > TIMEOUT_MS) {
-        db.prepare(`UPDATE brix_invoice_requests SET status = 'expired' WHERE id = ?`).run(requestId);
+      if (Date.now() - startTime > timeoutMs) {
         resolve(null);
         return;
       }
