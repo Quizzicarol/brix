@@ -3,6 +3,9 @@ const router = express.Router();
 const crypto = require('crypto');
 const { getDb } = require('../models/database');
 const { sendWakeUpPush } = require('../services/push');
+const wallet = require('../services/wallet');
+
+const FEE_RATE = parseFloat(process.env.BRIX_FEE_RATE || '0.005');
 
 const DOMAIN = process.env.BRIX_DOMAIN || 'localhost:3100';
 const PROTOCOL = process.env.NODE_ENV === 'production' ? 'https' : 'http';
@@ -108,7 +111,51 @@ router.get('/:identifier/callback', async (req, res) => {
     }
 
     if (!sparkInvoice) {
-      console.log(`[LNURL] Request ${requestId} timed out — recipient offline`);
+      // ── Offline fallback: server wallet receives on behalf of user ──
+      if (wallet.isEnabled()) {
+        console.log(`[LNURL] Recipient offline — creating server wallet invoice for ${amountSats} sats`);
+        try {
+          const feeSats = Math.max(
+            Math.round(amountSats * FEE_RATE),
+            parseInt(process.env.BRIX_MIN_FEE_SATS || '1', 10)
+          );
+          const netSats = amountSats - feeSats;
+
+          const walletInvoice = await wallet.createInvoice(
+            amountSats,
+            `BRIX offline: ${lnAddress} (${amountSats} sats)`
+          );
+
+          // Store as pending payment for later forwarding
+          const paymentId = crypto.randomUUID();
+          db.prepare(`
+            INSERT INTO brix_pending_payments
+              (id, user_id, amount_sats, payment_hash, status, sender_note,
+               server_invoice, server_payment_hash, fee_sats, net_amount_sats)
+            VALUES (?, ?, ?, ?, 'pending_payment', ?, ?, ?, ?, ?)
+          `).run(
+            paymentId, user.id, amountSats, walletInvoice.paymentHash,
+            sanitizedComment, walletInvoice.bolt11, walletInvoice.paymentHash,
+            feeSats, netSats
+          );
+
+          db.prepare(`UPDATE brix_invoice_requests SET status = 'expired' WHERE id = ?`).run(requestId);
+          console.log(`[LNURL] Server wallet invoice created for ${lnAddress}: ${amountSats} sats (fee ${feeSats}, net ${netSats})`);
+
+          return res.json({
+            pr: walletInvoice.bolt11,
+            routes: [],
+            successAction: {
+              tag: 'message',
+              message: `Pagamento de ${amountSats} sats enviado para ${lnAddress}!`,
+            },
+          });
+        } catch (walletErr) {
+          console.error(`[LNURL] Server wallet fallback failed:`, walletErr.message);
+        }
+      }
+
+      console.log(`[LNURL] Request ${requestId} timed out — recipient offline (no wallet fallback)`);
       db.prepare(`UPDATE brix_invoice_requests SET status = 'expired' WHERE id = ?`).run(requestId);
       return res.json({ status: 'ERROR', reason: 'BRIX_RECIPIENT_OFFLINE' });
     }
