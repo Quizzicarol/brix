@@ -38,7 +38,6 @@ function getWalletConfig() {
   if (walletConfig !== null) return walletConfig;
 
   if (!FEE_ENABLED) {
-    console.log(`[WALLET] FEE_ENABLED=${FEE_ENABLED} (raw: "${process.env.BRIX_FEE_ENABLED}")`);
     walletConfig = false;
     return false;
   }
