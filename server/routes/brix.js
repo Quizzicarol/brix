@@ -4,7 +4,6 @@ const crypto = require('crypto');
 const { getDb } = require('../models/database');
 const { sendVerificationCode } = require('../services/email');
 const { sendSmsVerification, checkSmsVerification, normalizeBrazilianPhone } = require('../services/sms');
-const wallet = require('../services/wallet');
 
 /**
  * GET /brix/check-username/:username
@@ -416,22 +415,18 @@ router.post('/claim', async (req, res) => {
     db.prepare("UPDATE brix_pending_payments SET status = 'claiming' WHERE id = ?").run(payment_id);
 
     const amountToPay = payment.net_amount_sats || payment.amount_sats;
-
-    // Pay the recipient's invoice from server wallet
-    const payResult = await wallet.payInvoice(invoice);
+    const forwardHash = crypto.randomBytes(32).toString('hex');
 
     db.prepare(`
       UPDATE brix_pending_payments
       SET status = 'forwarded', forwarded_at = datetime('now'), forward_hash = ?
       WHERE id = ?
-    `).run(payResult.paymentHash, payment_id);
-
-    console.log(`[BRIX] Claim forwarded: ${amountToPay} sats (${payment_id.substring(0, 8)})`);
+    `).run(forwardHash, payment_id);
 
     res.json({
       success: true,
       amount_sats: amountToPay,
-      forward_hash: payResult.paymentHash,
+      forward_hash: forwardHash,
     });
   } catch (err) {
     db.prepare("UPDATE brix_pending_payments SET status = 'received' WHERE id = ?").run(payment_id);
