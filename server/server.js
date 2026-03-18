@@ -7,7 +7,6 @@ const rateLimit = require('express-rate-limit');
 const db = require('./models/database');
 const lnurlRoutes = require('./routes/lnurl');
 const brixRoutes = require('./routes/brix');
-const paymentForward = require('./services/payment-forward');
 
 const app = express();
 const PORT = process.env.PORT || 3100;
@@ -69,9 +68,6 @@ app.get('/health', (req, res) => {
 
 // Initialize database and start
 db.initialize();
-
-// Start offline payment forwarder (detects wallet payments and forwards to recipients)
-paymentForward.start();
 
 app.listen(PORT, HOST, () => {
   console.log(`BRIX server running on http://${HOST}:${PORT}`);
