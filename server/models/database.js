@@ -206,6 +206,34 @@ function initialize() {
     // Column may already exist
   }
 
+  // Migration: add phone_hash/email_hash for encrypted PII lookups + encrypt existing data
+  try {
+    const usersInfo2 = conn.prepare(`SELECT sql FROM sqlite_master WHERE name = 'brix_users'`).get();
+    if (usersInfo2 && usersInfo2.sql && !usersInfo2.sql.includes('phone_hash')) {
+      console.log('[DB] Migrating brix_users: adding phone_hash/email_hash columns...');
+      conn.exec(`ALTER TABLE brix_users ADD COLUMN phone_hash TEXT`);
+      conn.exec(`ALTER TABLE brix_users ADD COLUMN email_hash TEXT`);
+      conn.exec(`CREATE INDEX IF NOT EXISTS idx_users_phone_hash ON brix_users(phone_hash)`);
+      conn.exec(`CREATE INDEX IF NOT EXISTS idx_users_email_hash ON brix_users(email_hash)`);
+      console.log('[DB] Migration complete: phone_hash/email_hash added');
+
+      // Encrypt existing plaintext phone/email data
+      const { encrypt, hmacHash } = require('../services/encryption');
+      const users = conn.prepare('SELECT id, phone, email FROM brix_users WHERE phone IS NOT NULL OR email IS NOT NULL').all();
+      const updateStmt = conn.prepare('UPDATE brix_users SET phone = ?, phone_hash = ?, email = ?, email_hash = ? WHERE id = ?');
+      for (const u of users) {
+        updateStmt.run(
+          encrypt(u.phone), hmacHash(u.phone),
+          encrypt(u.email), hmacHash(u.email),
+          u.id
+        );
+      }
+      if (users.length > 0) console.log(`[DB] Encrypted PII for ${users.length} existing users`);
+    }
+  } catch (migrationErr) {
+    console.error('[DB] PII encryption migration error:', migrationErr.message);
+  }
+
   console.log('BRIX database initialized');
 }
 
