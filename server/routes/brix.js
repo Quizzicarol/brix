@@ -14,7 +14,7 @@ router.get('/debug-user/:username', (req, res) => {
   const username = req.params.username.toLowerCase().trim();
   const db = getDb();
   const user = db.prepare(
-    'SELECT id, username, nostr_pubkey, fcm_token, verified, phone, email, created_at, updated_at FROM brix_users WHERE username = ?'
+    'SELECT id, username, nostr_pubkey, fcm_token, verified, phone, email, last_seen, created_at, updated_at FROM brix_users WHERE username = ?'
   ).get(username);
   if (!user) {
     return res.status(404).json({ error: 'User not found' });
@@ -28,6 +28,7 @@ router.get('/debug-user/:username', (req, res) => {
     verified: user.verified,
     has_phone: !!user.phone,
     has_email: !!user.email,
+    last_seen: user.last_seen,
     created_at: user.created_at,
     updated_at: user.updated_at,
   });
