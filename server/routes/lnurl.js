@@ -51,11 +51,13 @@ router.get('/:identifier', (req, res) => {
 /**
  * LNURL-pay callback
  *
- * All senders (BRIX app or external wallets) get the Spark invoice directly.
- * The app generates a Spark/Greenlight invoice and the server returns it.
- * Platform fees (0.5%) are collected app-side after payment settles.
+ * Flow:
+ * 1. Try to get a Spark invoice from the recipient's app (polling + FCM push)
+ * 2. Sender pays the Spark invoice → money goes to recipient's Spark channel
+ * 3. Recipient sees payment when they open the app (Spark is cloud-hosted)
  *
- * If recipient app is offline: BRIX_RECIPIENT_OFFLINE error returned.
+ * IMPORTANT: The invoice MUST always be a Spark invoice from the recipient's device.
+ * Do NOT use LNbits or any server wallet as fallback.
  */
 router.get('/:identifier/callback', async (req, res) => {
   const { identifier } = req.params;
@@ -93,60 +95,69 @@ router.get('/:identifier/callback', async (req, res) => {
     // Check if user's app is reachable (has FCM token or was recently seen polling)
     const recentlySeen = user.last_seen && (Date.now() - new Date(user.last_seen + 'Z').getTime()) < 30000;
     const hasFcm = !!user.fcm_token;
-    if (!hasFcm && !recentlySeen) {
-      console.log(`[LNURL] User ${identifier} has no FCM token and app not recently seen — rejecting immediately`);
-      db.prepare(`UPDATE brix_invoice_requests SET status = 'expired' WHERE id = ?`).run(requestId);
-      return res.json({ status: 'ERROR', reason: 'BRIX_RECIPIENT_OFFLINE' });
-    }
 
-    console.log(`[LNURL] Request ${requestId} for ${lnAddress}: ${amountSats} sats (source=${source || 'external'}) — waiting for app... (fcm=${hasFcm}, recentlySeen=${recentlySeen})`);
+    let sparkInvoice = null;
 
-    // ── First try: quick poll (app may already be online polling) ──
-    const QUICK_TIMEOUT = 8000;
-    let sparkInvoice = await pollForInvoice(db, requestId, QUICK_TIMEOUT);
+    if (hasFcm || recentlySeen) {
+      console.log(`[LNURL] Request ${requestId} for ${lnAddress}: ${amountSats} sats (source=${source || 'external'}) — waiting for app... (fcm=${hasFcm}, recentlySeen=${recentlySeen})`);
 
-    // ── If no response, send push notification to wake up the app ──
-    if (!sparkInvoice) {
-      let pushSent = await sendWakeUpPush(user.id, requestId, amountSats);
+      // ── First try: quick poll (app may already be online polling) ──
+      const QUICK_TIMEOUT = 8000;
+      sparkInvoice = await pollForInvoice(db, requestId, QUICK_TIMEOUT);
 
-      // If this user has no FCM token, try sibling users with same pubkey
-      if (!pushSent && user.nostr_pubkey) {
-        const sibling = db.prepare(
-          'SELECT id FROM brix_users WHERE nostr_pubkey = ? AND id != ? AND fcm_token IS NOT NULL AND verified = 1'
-        ).get(user.nostr_pubkey, user.id);
-        if (sibling) {
-          console.log(`[LNURL] No FCM token for ${identifier}, trying sibling user...`);
-          pushSent = await sendWakeUpPush(sibling.id, requestId, amountSats);
+      // ── If no response, send push notification to wake up the app ──
+      if (!sparkInvoice) {
+        let pushSent = await sendWakeUpPush(user.id, requestId, amountSats);
+
+        // If this user has no FCM token, try sibling users with same pubkey
+        if (!pushSent && user.nostr_pubkey) {
+          const sibling = db.prepare(
+            'SELECT id FROM brix_users WHERE nostr_pubkey = ? AND id != ? AND fcm_token IS NOT NULL AND verified = 1'
+          ).get(user.nostr_pubkey, user.id);
+          if (sibling) {
+            console.log(`[LNURL] No FCM token for ${identifier}, trying sibling user...`);
+            pushSent = await sendWakeUpPush(sibling.id, requestId, amountSats);
+          }
         }
-      }
 
-      if (pushSent) {
-        console.log(`[LNURL] Push sent to ${lnAddress}, extending timeout...`);
-      } else {
-        console.log(`[LNURL] No push available for ${lnAddress}, polling anyway...`);
+        if (pushSent) {
+          console.log(`[LNURL] Push sent to ${lnAddress}, extending timeout...`);
+        } else {
+          console.log(`[LNURL] No push available for ${lnAddress}, polling anyway...`);
+        }
+        // Extended poll — app may respond after FCM wake-up
+        const PUSH_TIMEOUT = 30000;
+        sparkInvoice = await pollForInvoice(db, requestId, PUSH_TIMEOUT);
       }
-      // Always do extended poll — app may already be online polling
-      const PUSH_TIMEOUT = 60000;
-      sparkInvoice = await pollForInvoice(db, requestId, PUSH_TIMEOUT);
+    } else {
+      // No FCM and not recently seen — still try polling, app might come online
+      console.log(`[LNURL] User ${identifier} has no FCM token and app not recently seen — polling with extended timeout`);
+      const EXTENDED_TIMEOUT = 45000;
+      sparkInvoice = await pollForInvoice(db, requestId, EXTENDED_TIMEOUT);
     }
 
-    if (!sparkInvoice) {
-      console.log(`[LNURL] Request ${requestId} timed out — recipient offline`);
-      db.prepare(`UPDATE brix_invoice_requests SET status = 'expired' WHERE id = ?`).run(requestId);
-      return res.json({ status: 'ERROR', reason: 'BRIX_RECIPIENT_OFFLINE' });
+    // ── App responded with a Spark invoice ──
+    if (sparkInvoice) {
+      db.prepare(`UPDATE brix_invoice_requests SET status = 'completed' WHERE id = ?`).run(requestId);
+      console.log(`[LNURL] ✓ Spark invoice ready for ${lnAddress}: ${amountSats} sats`);
+
+      return res.json({
+        pr: sparkInvoice,
+        routes: [],
+        successAction: {
+          tag: 'message',
+          message: `Pagamento de ${amountSats} sats enviado para ${lnAddress}!`,
+        },
+      });
     }
 
-    db.prepare(`UPDATE brix_invoice_requests SET status = 'completed' WHERE id = ?`).run(requestId);
-
-    console.log(`[LNURL] Invoice ready for ${lnAddress}: ${amountSats} sats`);
+    // ── App didn't respond — payment cannot proceed without Spark invoice ──
+    db.prepare(`UPDATE brix_invoice_requests SET status = 'expired' WHERE id = ?`).run(requestId);
+    console.log(`[LNURL] ✗ App offline for ${lnAddress} — no Spark invoice generated. Payment cannot proceed.`);
 
     return res.json({
-      pr: sparkInvoice,
-      routes: [],
-      successAction: {
-        tag: 'message',
-        message: `Pagamento de ${amountSats} sats enviado para ${lnAddress}!`,
-      },
+      status: 'ERROR',
+      reason: 'Destinatário offline. Tente novamente em alguns minutos.',
     });
   } catch (err) {
     console.error('Error in LNURL callback:', err);
