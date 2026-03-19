@@ -6,6 +6,33 @@ const { sendVerificationCode } = require('../services/email');
 const { sendSmsVerification, checkSmsVerification, normalizeBrazilianPhone } = require('../services/sms');
 
 /**
+ * GET /brix/debug-user/:username
+ * Temporary debug endpoint to check user registration state
+ */
+router.get('/debug-user/:username', (req, res) => {
+  const username = req.params.username.toLowerCase().trim();
+  const db = getDb();
+  const user = db.prepare(
+    'SELECT id, username, nostr_pubkey, fcm_token, verified, phone, email, created_at, updated_at FROM brix_users WHERE username = ?'
+  ).get(username);
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+  res.json({
+    id: user.id,
+    username: user.username,
+    pubkey_prefix: user.nostr_pubkey ? user.nostr_pubkey.substring(0, 16) + '...' : null,
+    has_fcm_token: !!user.fcm_token,
+    fcm_token_prefix: user.fcm_token ? user.fcm_token.substring(0, 20) + '...' : null,
+    verified: user.verified,
+    has_phone: !!user.phone,
+    has_email: !!user.email,
+    created_at: user.created_at,
+    updated_at: user.updated_at,
+  });
+});
+
+/**
  * GET /brix/check-username/:username
  * Check if a username is available
  */
@@ -666,6 +693,9 @@ router.get('/invoice-requests/:pubkey', (req, res) => {
   if (!users.length) {
     return res.json({ requests: [] });
   }
+
+  // Update last_seen for all users with this pubkey (relay is actively polling)
+  db.prepare("UPDATE brix_users SET last_seen = datetime('now') WHERE nostr_pubkey = ? AND verified = 1").run(pubkey);
 
   const userIds = users.map(u => u.id);
   const placeholders = userIds.map(() => '?').join(',');

@@ -95,6 +95,16 @@ function initialize() {
     CREATE INDEX IF NOT EXISTS idx_fee_server_hash ON brix_fee_transactions(server_payment_hash);
   `);
 
+  // Migration: add last_seen column to brix_users for relay activity tracking
+  try {
+    const usersInfo = conn.prepare(`SELECT sql FROM sqlite_master WHERE name = 'brix_users'`).get();
+    if (usersInfo && usersInfo.sql && !usersInfo.sql.includes('last_seen')) {
+      console.log('[DB] Migrating brix_users: adding last_seen column...');
+      conn.exec(`ALTER TABLE brix_users ADD COLUMN last_seen TEXT`);
+      console.log('[DB] Migration complete: last_seen added');
+    }
+  } catch (e) { /* column may already exist */ }
+
   // Migration: add server wallet columns to brix_pending_payments for offline payments
   try {
     const ppInfo = conn.prepare(`SELECT sql FROM sqlite_master WHERE name = 'brix_pending_payments'`).get();
