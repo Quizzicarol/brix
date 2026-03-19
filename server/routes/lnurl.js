@@ -90,7 +90,16 @@ router.get('/:identifier/callback', async (req, res) => {
       VALUES (?, ?, ?, 'pending')
     `).run(requestId, user.id, amountSats);
 
-    console.log(`[LNURL] Request ${requestId} for ${lnAddress}: ${amountSats} sats (source=${source || 'external'}) — waiting for app...`);
+    // Check if user's app is reachable (has FCM token or was recently seen polling)
+    const recentlySeen = user.last_seen && (Date.now() - new Date(user.last_seen + 'Z').getTime()) < 30000;
+    const hasFcm = !!user.fcm_token;
+    if (!hasFcm && !recentlySeen) {
+      console.log(`[LNURL] User ${identifier} has no FCM token and app not recently seen — rejecting immediately`);
+      db.prepare(`UPDATE brix_invoice_requests SET status = 'expired' WHERE id = ?`).run(requestId);
+      return res.json({ status: 'ERROR', reason: 'BRIX_RECIPIENT_OFFLINE' });
+    }
+
+    console.log(`[LNURL] Request ${requestId} for ${lnAddress}: ${amountSats} sats (source=${source || 'external'}) — waiting for app... (fcm=${hasFcm}, recentlySeen=${recentlySeen})`);
 
     // ── First try: quick poll (app may already be online polling) ──
     const QUICK_TIMEOUT = 8000;
