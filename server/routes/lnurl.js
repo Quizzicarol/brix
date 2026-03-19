@@ -98,13 +98,27 @@ router.get('/:identifier/callback', async (req, res) => {
 
     // ── If no response, send push notification to wake up the app ──
     if (!sparkInvoice) {
-      const pushSent = await sendWakeUpPush(user.id, requestId, amountSats);
+      let pushSent = await sendWakeUpPush(user.id, requestId, amountSats);
+
+      // If this user has no FCM token, try sibling users with same pubkey
+      if (!pushSent && user.nostr_pubkey) {
+        const sibling = db.prepare(
+          'SELECT id FROM brix_users WHERE nostr_pubkey = ? AND id != ? AND fcm_token IS NOT NULL AND verified = 1'
+        ).get(user.nostr_pubkey, user.id);
+        if (sibling) {
+          console.log(`[LNURL] No FCM token for ${identifier}, trying sibling user...`);
+          pushSent = await sendWakeUpPush(sibling.id, requestId, amountSats);
+        }
+      }
+
       if (pushSent) {
         console.log(`[LNURL] Push sent to ${lnAddress}, extending timeout...`);
-        // Give app time to wake up and generate invoice (extra 30s)
-        const PUSH_TIMEOUT = 30000;
-        sparkInvoice = await pollForInvoice(db, requestId, PUSH_TIMEOUT);
+      } else {
+        console.log(`[LNURL] No push available for ${lnAddress}, polling anyway...`);
       }
+      // Always do extended poll — app may already be online polling
+      const PUSH_TIMEOUT = 60000;
+      sparkInvoice = await pollForInvoice(db, requestId, PUSH_TIMEOUT);
     }
 
     if (!sparkInvoice) {
