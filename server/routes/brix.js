@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { getDb } = require('../models/database');
 const { sendVerificationCode } = require('../services/email');
 const { sendSmsVerification, checkSmsVerification, normalizeBrazilianPhone } = require('../services/sms');
+const { encrypt, decrypt, hmacHash } = require('../services/encryption');
 
 /**
  * GET /brix/debug-user/:username
@@ -93,11 +94,11 @@ router.post('/register', async (req, res) => {
   if (existingUsername && existingUsername.verified) {
     // If the existing BRIX was created on the web (web_ pubkey) and the email matches,
     // allow the app to claim it by updating the pubkey
-    if (existingUsername.nostr_pubkey.startsWith('web_') && cleanEmail && existingUsername.email === cleanEmail) {
+    if (existingUsername.nostr_pubkey.startsWith('web_') && cleanEmail && decrypt(existingUsername.email) === cleanEmail) {
       const domain = process.env.BRIX_DOMAIN || 'brix.app';
       db.prepare("UPDATE brix_users SET nostr_pubkey = ?, updated_at = datetime('now') WHERE id = ?").run(nostr_pubkey, existingUsername.id);
       if (cleanPhone) {
-        db.prepare("UPDATE brix_users SET phone = ?, updated_at = datetime('now') WHERE id = ?").run(cleanPhone, existingUsername.id);
+        db.prepare("UPDATE brix_users SET phone = ?, phone_hash = ?, updated_at = datetime('now') WHERE id = ?").run(encrypt(cleanPhone), hmacHash(cleanPhone), existingUsername.id);
       }
       console.log(`[BRIX] Web BRIX claimed by app: ${cleanUsername}@${domain} -> ${nostr_pubkey.substring(0, 16)}...`);
       return res.json({
@@ -114,7 +115,7 @@ router.post('/register', async (req, res) => {
 
   // Check if email is already used by ANY user (verified or not) with a DIFFERENT username
   if (cleanEmail) {
-    const existingEmail = db.prepare('SELECT id, username, verified FROM brix_users WHERE email = ? AND username != ?').get(cleanEmail, cleanUsername);
+    const existingEmail = db.prepare('SELECT id, username, verified FROM brix_users WHERE email_hash = ? AND username != ?').get(hmacHash(cleanEmail), cleanUsername);
     if (existingEmail) {
       if (existingEmail.verified) {
         return res.status(409).json({ error: 'Este email já está vinculado a outro username' });
@@ -127,7 +128,7 @@ router.post('/register', async (req, res) => {
 
   // Check if phone is already used by ANY user (verified or not) with a DIFFERENT username
   if (cleanPhone) {
-    const existingPhone = db.prepare('SELECT id, username, verified FROM brix_users WHERE phone = ? AND username != ?').get(cleanPhone, cleanUsername);
+    const existingPhone = db.prepare('SELECT id, username, verified FROM brix_users WHERE phone_hash = ? AND username != ?').get(hmacHash(cleanPhone), cleanUsername);
     if (existingPhone) {
       if (existingPhone.verified) {
         return res.status(409).json({ error: 'Este celular já está vinculado a outro username' });
@@ -146,9 +147,9 @@ router.post('/register', async (req, res) => {
   if (existingUsername && !existingUsername.verified) {
     const userId = existingUsername.id;
     db.prepare(`
-      UPDATE brix_users SET phone = ?, email = ?, nostr_pubkey = ?, updated_at = datetime('now')
+      UPDATE brix_users SET phone = ?, phone_hash = ?, email = ?, email_hash = ?, nostr_pubkey = ?, updated_at = datetime('now')
       WHERE id = ?
-    `).run(cleanPhone, cleanEmail, nostr_pubkey, userId);
+    `).run(encrypt(cleanPhone), hmacHash(cleanPhone), encrypt(cleanEmail), hmacHash(cleanEmail), nostr_pubkey, userId);
 
     // Invalidate old verification codes
     db.prepare("UPDATE brix_verifications SET used = 1 WHERE user_id = ? AND used = 0").run(userId);
@@ -198,9 +199,9 @@ router.post('/register', async (req, res) => {
   // New registration
   const userId = crypto.randomUUID();
   db.prepare(`
-    INSERT INTO brix_users (id, username, phone, email, nostr_pubkey)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(userId, cleanUsername, cleanPhone, cleanEmail, nostr_pubkey);
+    INSERT INTO brix_users (id, username, phone, phone_hash, email, email_hash, nostr_pubkey)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(userId, cleanUsername, encrypt(cleanPhone), hmacHash(cleanPhone), encrypt(cleanEmail), hmacHash(cleanEmail), nostr_pubkey);
 
   const verifyVia = cleanPhone ? 'sms' : 'email';
   const destination = cleanPhone || cleanEmail;
@@ -272,8 +273,9 @@ router.post('/verify', async (req, res) => {
   }
 
   // If user registered with phone, verify via Twilio Verify API
-  if (user.phone && !!process.env.TWILIO_ACCOUNT_SID) {
-    const valid = await checkSmsVerification(user.phone, code);
+  const userPhone = decrypt(user.phone);
+  if (userPhone && !!process.env.TWILIO_ACCOUNT_SID) {
+    const valid = await checkSmsVerification(userPhone, code);
     if (!valid) {
       return res.status(400).json({ error: 'Código inválido ou expirado' });
     }
@@ -325,8 +327,10 @@ router.post('/resend', async (req, res) => {
     return res.status(404).json({ error: 'Usuário não encontrado ou já verificado' });
   }
 
-  const verifyVia = user.phone ? 'sms' : 'email';
-  const destination = user.phone || user.email;
+  const resendPhone = decrypt(user.phone);
+  const resendEmail = decrypt(user.email);
+  const verifyVia = resendPhone ? 'sms' : 'email';
+  const destination = resendPhone || resendEmail;
   const hasSmtp = !!process.env.SMTP_USER;
   const hasSms = !!process.env.TWILIO_ACCOUNT_SID;
 
@@ -334,7 +338,7 @@ router.post('/resend', async (req, res) => {
   if (verifyVia === 'sms' && hasSms) {
     let sent = false;
     try {
-      sent = await sendSmsVerification(user.phone);
+      sent = await sendSmsVerification(resendPhone);
     } catch (err) {
       console.error(`[BRIX] Erro ao reenviar SMS: ${err.message}`);
     }
@@ -357,9 +361,9 @@ router.post('/resend', async (req, res) => {
   console.log(`[BRIX] Novo código para ${destination}: ${code}`);
 
   let sent = false;
-  if (user.email && hasSmtp) {
+  if (resendEmail && hasSmtp) {
     try {
-      sent = await sendVerificationCode(user.email, code);
+      sent = await sendVerificationCode(resendEmail, code);
     } catch (err) {
       console.error(`[BRIX] Erro ao reenviar email: ${err.message}`);
     }
@@ -534,8 +538,8 @@ router.get('/address/:pubkey', (req, res) => {
   const isOwner = authedPubkey === pubkey;
   const response = { brix_address: `${user.username}@${domain}`, username: user.username };
   if (isOwner) {
-    response.phone = user.phone;
-    response.email = user.email;
+    response.phone = decrypt(user.phone);
+    response.email = decrypt(user.email);
   }
   res.json(response);
 });
@@ -547,7 +551,7 @@ router.get('/address/:pubkey', (req, res) => {
 router.get('/find-by-email/:email', (req, res) => {
   const email = req.params.email.trim().toLowerCase();
   const db = getDb();
-  const user = db.prepare('SELECT username, phone, email, nostr_pubkey FROM brix_users WHERE email = ? AND verified = 1').get(email);
+  const user = db.prepare('SELECT username, phone, email, nostr_pubkey FROM brix_users WHERE email_hash = ? AND verified = 1').get(hmacHash(email));
 
   if (!user) {
     return res.status(404).json({ error: 'Nenhum BRIX encontrado' });
@@ -557,8 +561,8 @@ router.get('/find-by-email/:email', (req, res) => {
   res.json({
     brix_address: `${user.username}@${domain}`,
     username: user.username,
-    phone: user.phone,
-    email: user.email,
+    phone: decrypt(user.phone),
+    email: decrypt(user.email),
     has_web_pubkey: user.nostr_pubkey.startsWith('web_'),
   });
 });
@@ -618,7 +622,7 @@ router.get('/resolve/:query', (req, res) => {
 
   // Try email
   if (query.includes('@')) {
-    user = db.prepare('SELECT username, nostr_pubkey FROM brix_users WHERE email = ? AND verified = 1').get(query);
+    user = db.prepare('SELECT username, nostr_pubkey FROM brix_users WHERE email_hash = ? AND verified = 1').get(hmacHash(query));
     if (user) {
       return res.json({ found: true, brix_address: `${user.username}@${domain}`, username: user.username, nostr_pubkey: user.nostr_pubkey, matched_by: 'email' });
     }
@@ -638,7 +642,7 @@ router.get('/resolve/:query', (req, res) => {
     candidates.add(normalizeBrazilianPhone(rawPhone).replace(/\D/g, ''));
 
     for (const candidate of candidates) {
-      user = db.prepare('SELECT username, nostr_pubkey FROM brix_users WHERE phone = ? AND verified = 1').get(candidate);
+      user = db.prepare('SELECT username, nostr_pubkey FROM brix_users WHERE phone_hash = ? AND verified = 1').get(hmacHash(candidate));
       if (user) {
         return res.json({ found: true, brix_address: `${user.username}@${domain}`, username: user.username, nostr_pubkey: user.nostr_pubkey, matched_by: 'phone' });
       }
@@ -816,7 +820,7 @@ router.post('/confirm-update', async (req, res) => {
     if (!valid) {
       return res.status(400).json({ error: 'Código inválido ou expirado' });
     }
-    db.prepare("UPDATE brix_users SET phone = ?, updated_at = datetime('now') WHERE id = ?").run(cleanPhone, user.id);
+    db.prepare("UPDATE brix_users SET phone = ?, phone_hash = ?, updated_at = datetime('now') WHERE id = ?").run(encrypt(cleanPhone), hmacHash(cleanPhone), user.id);
   } else {
     // Email-based: check code in our database
     const verification = db.prepare(`
@@ -831,7 +835,7 @@ router.post('/confirm-update', async (req, res) => {
 
     db.prepare('UPDATE brix_verifications SET used = 1 WHERE id = ?').run(verification.id);
     if (cleanEmail) {
-      db.prepare("UPDATE brix_users SET email = ?, updated_at = datetime('now') WHERE id = ?").run(cleanEmail, user.id);
+      db.prepare("UPDATE brix_users SET email = ?, email_hash = ?, updated_at = datetime('now') WHERE id = ?").run(encrypt(cleanEmail), hmacHash(cleanEmail), user.id);
     }
   }
 
