@@ -661,16 +661,19 @@ router.get('/invoice-requests/:pubkey', (req, res) => {
   const { pubkey } = req.params;
   const db = getDb();
 
-  const user = db.prepare('SELECT id FROM brix_users WHERE nostr_pubkey = ? AND verified = 1').get(pubkey);
-  if (!user) {
+  // Get ALL users with same pubkey (handles multiple usernames per device)
+  const users = db.prepare('SELECT id FROM brix_users WHERE nostr_pubkey = ? AND verified = 1').all(pubkey);
+  if (!users.length) {
     return res.json({ requests: [] });
   }
 
+  const userIds = users.map(u => u.id);
+  const placeholders = userIds.map(() => '?').join(',');
   const requests = db.prepare(`
     SELECT id, amount_sats, created_at FROM brix_invoice_requests
-    WHERE user_id = ? AND status = 'pending' AND created_at > datetime('now', '-2 minutes')
+    WHERE user_id IN (${placeholders}) AND status = 'pending' AND created_at > datetime('now', '-2 minutes')
     ORDER BY created_at DESC
-  `).all(user.id);
+  `).all(...userIds);
 
   res.json({ requests });
 });
@@ -828,13 +831,13 @@ router.post('/register-push', (req, res) => {
   }
 
   const db = getDb();
-  const user = db.prepare('SELECT id FROM brix_users WHERE nostr_pubkey = ? AND verified = 1').get(pubkey);
-  if (!user) {
+  // Update FCM token for ALL users with same pubkey (handles multiple usernames)
+  const result = db.prepare("UPDATE brix_users SET fcm_token = ?, updated_at = datetime('now') WHERE nostr_pubkey = ? AND verified = 1").run(fcm_token, pubkey);
+  if (result.changes === 0) {
     return res.status(404).json({ error: 'User not found' });
   }
 
-  db.prepare("UPDATE brix_users SET fcm_token = ?, updated_at = datetime('now') WHERE id = ?").run(fcm_token, user.id);
-  console.log(`[PUSH] FCM token registered for user ${user.id}`);
+  console.log(`[PUSH] FCM token registered for ${result.changes} user(s) with pubkey ${pubkey.slice(0, 8)}...`);
   res.json({ success: true });
 });
 
