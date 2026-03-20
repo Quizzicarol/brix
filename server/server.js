@@ -7,6 +7,7 @@ const rateLimit = require('express-rate-limit');
 const db = require('./models/database');
 const lnurlRoutes = require('./routes/lnurl');
 const brixRoutes = require('./routes/brix');
+const { nip98Auth } = require('./middleware/nip98');
 
 const app = express();
 const PORT = process.env.PORT || 3100;
@@ -37,6 +38,9 @@ app.use(cors({
   methods: ['GET', 'POST'],
 }));
 app.use(express.json());
+
+// NIP-98 HTTP Auth — verify signed requests (backward-compatible)
+app.use(nip98Auth);
 
 // Global rate limiting
 const limiter = rateLimit({
