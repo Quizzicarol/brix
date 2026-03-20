@@ -6,33 +6,7 @@ const { sendVerificationCode } = require('../services/email');
 const { sendSmsVerification, checkSmsVerification, normalizeBrazilianPhone } = require('../services/sms');
 const { encrypt, decrypt, hmacHash } = require('../services/encryption');
 
-/**
- * GET /brix/debug-user/:username
- * Temporary debug endpoint to check user registration state
- */
-router.get('/debug-user/:username', (req, res) => {
-  const username = req.params.username.toLowerCase().trim();
-  const db = getDb();
-  const user = db.prepare(
-    'SELECT id, username, nostr_pubkey, fcm_token, verified, phone, email, last_seen, created_at, updated_at FROM brix_users WHERE username = ?'
-  ).get(username);
-  if (!user) {
-    return res.status(404).json({ error: 'User not found' });
-  }
-  res.json({
-    id: user.id,
-    username: user.username,
-    pubkey_prefix: user.nostr_pubkey ? user.nostr_pubkey.substring(0, 16) + '...' : null,
-    has_fcm_token: !!user.fcm_token,
-    fcm_token_prefix: user.fcm_token ? user.fcm_token.substring(0, 20) + '...' : null,
-    verified: user.verified,
-    has_phone: !!user.phone,
-    has_email: !!user.email,
-    last_seen: user.last_seen,
-    created_at: user.created_at,
-    updated_at: user.updated_at,
-  });
-});
+// debug-user endpoint REMOVED for security (information disclosure)
 
 /**
  * GET /brix/check-username/:username
@@ -193,7 +167,6 @@ router.post('/register', async (req, res) => {
       success: true, verified: false,
       message: sent ? 'Código enviado para seu email' : (canSend ? 'Erro ao enviar email' : 'Use o código de verificação'),
       user_id: userId, username: cleanUsername, verify_via: verifyVia,
-      ...(!canSend && { dev_code: code }),
     });
   }
 
@@ -252,7 +225,6 @@ router.post('/register', async (req, res) => {
     success: true, verified: false,
     message: sent ? 'Código enviado para seu email' : (canSend ? 'Erro ao enviar email' : 'Use o código de verificação'),
     user_id: userId, username: cleanUsername, verify_via: verifyVia,
-    ...(!canSend && { dev_code: code }),
   });
 });
 
@@ -374,7 +346,6 @@ router.post('/resend', async (req, res) => {
   res.json({
     success: true, verified: false,
     message: sent ? 'Novo código enviado para seu email' : (canSend ? 'Erro ao reenviar' : 'Use o código de verificação'),
-    ...(!canSend && { dev_code: code }),
   });
 });
 
@@ -562,8 +533,6 @@ router.get('/find-by-email/:email', (req, res) => {
   res.json({
     brix_address: `${user.username}@${domain}`,
     username: user.username,
-    phone: decrypt(user.phone),
-    email: decrypt(user.email),
     has_web_pubkey: user.nostr_pubkey.startsWith('web_'),
   });
 });
@@ -605,27 +574,27 @@ router.get('/resolve/:query', (req, res) => {
   const domain = process.env.BRIX_DOMAIN || 'brix.app';
 
   // Try username first
-  let user = db.prepare('SELECT username, nostr_pubkey FROM brix_users WHERE username = ? AND verified = 1').get(query);
+  let user = db.prepare('SELECT username FROM brix_users WHERE username = ? AND verified = 1').get(query);
   if (user) {
-    return res.json({ found: true, brix_address: `${user.username}@${domain}`, username: user.username, nostr_pubkey: user.nostr_pubkey, matched_by: 'username' });
+    return res.json({ found: true, brix_address: `${user.username}@${domain}`, username: user.username, matched_by: 'username' });
   }
 
   // Try as brix address (user@brix.app)
   if (query.includes('@')) {
     const parts = query.split('@');
     if (parts[1] === domain) {
-      user = db.prepare('SELECT username, nostr_pubkey FROM brix_users WHERE username = ? AND verified = 1').get(parts[0]);
+      user = db.prepare('SELECT username FROM brix_users WHERE username = ? AND verified = 1').get(parts[0]);
       if (user) {
-        return res.json({ found: true, brix_address: `${user.username}@${domain}`, username: user.username, nostr_pubkey: user.nostr_pubkey, matched_by: 'brix_address' });
+        return res.json({ found: true, brix_address: `${user.username}@${domain}`, username: user.username, matched_by: 'brix_address' });
       }
     }
   }
 
   // Try email
   if (query.includes('@')) {
-    user = db.prepare('SELECT username, nostr_pubkey FROM brix_users WHERE email_hash = ? AND verified = 1').get(hmacHash(query));
+    user = db.prepare('SELECT username FROM brix_users WHERE email_hash = ? AND verified = 1').get(hmacHash(query));
     if (user) {
-      return res.json({ found: true, brix_address: `${user.username}@${domain}`, username: user.username, nostr_pubkey: user.nostr_pubkey, matched_by: 'email' });
+      return res.json({ found: true, brix_address: `${user.username}@${domain}`, username: user.username, matched_by: 'email' });
     }
   }
 
@@ -643,9 +612,9 @@ router.get('/resolve/:query', (req, res) => {
     candidates.add(normalizeBrazilianPhone(rawPhone).replace(/\D/g, ''));
 
     for (const candidate of candidates) {
-      user = db.prepare('SELECT username, nostr_pubkey FROM brix_users WHERE phone_hash = ? AND verified = 1').get(hmacHash(candidate));
+      user = db.prepare('SELECT username FROM brix_users WHERE phone_hash = ? AND verified = 1').get(hmacHash(candidate));
       if (user) {
-        return res.json({ found: true, brix_address: `${user.username}@${domain}`, username: user.username, nostr_pubkey: user.nostr_pubkey, matched_by: 'phone' });
+        return res.json({ found: true, brix_address: `${user.username}@${domain}`, username: user.username, matched_by: 'phone' });
       }
     }
   }
@@ -786,9 +755,8 @@ router.post('/update-contact', async (req, res) => {
   const canSend = hasSmtp;
   res.json({
     success: true,
-    message: sent ? 'Código enviado para o novo email' : (canSend ? 'Erro ao enviar email' : 'Código gerado (DEV)'),
+    message: sent ? 'Código enviado para o novo email' : (canSend ? 'Erro ao enviar email' : 'Código gerado'),
     verify_via: verifyVia,
-    ...(!canSend && { dev_code: code }),
   });
 });
 

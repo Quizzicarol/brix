@@ -21,7 +21,7 @@ function getTransporter() {
     port,
     secure: isSecure,
     auth: { user, pass },
-    tls: { rejectUnauthorized: false },
+    tls: { rejectUnauthorized: true },
   });
 
   console.log(`[EMAIL] SMTP configured: ${host}:${port} as ${user}`);
