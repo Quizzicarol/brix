@@ -16,7 +16,18 @@ const HOST = process.env.HOST || '0.0.0.0';
 app.set('trust proxy', 1);
 
 // Security
-app.use(helmet({ contentSecurityPolicy: false }));
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      imgSrc: ["'self'", "data:"],
+      connectSrc: ["'self'"],
+    },
+  },
+}));
 app.use(cors({
   origin: [
     'https://brix.brostr.app',
@@ -48,6 +59,7 @@ app.use('/brix/register', authLimiter);
 app.use('/brix/verify', authLimiter);
 app.use('/brix/resend', authLimiter);
 app.use('/brix/update-contact', authLimiter);
+app.use('/brix/confirm-update', authLimiter);
 
 // Rate limiting for lookup endpoints (prevent enumeration/scraping)
 const lookupLimiter = rateLimit({

@@ -153,7 +153,7 @@ router.post('/register', async (req, res) => {
       INSERT INTO brix_verifications (id, user_id, code, type, destination, expires_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(verificationId, userId, code, verifyVia, destination, expiresAt);
-    console.log(`[BRIX] Código de verificação (re-registro) para ${destination}: ${code}`);
+    console.log(`[BRIX] Código de verificação (re-registro) enviado para ${destination}`);
 
     let sent = false;
     if (verifyVia === 'email' && cleanEmail && hasSmtp) {
@@ -205,7 +205,7 @@ router.post('/register', async (req, res) => {
     VALUES (?, ?, ?, ?, ?, ?)
   `).run(verificationId, userId, code, verifyVia, destination, expiresAt);
 
-  console.log(`[BRIX] Código de verificação para ${destination}: ${code}`);
+  console.log(`[BRIX] Código de verificação enviado para ${destination}`);
 
   let sent = false;
   if (cleanEmail && hasSmtp) {
@@ -218,7 +218,7 @@ router.post('/register', async (req, res) => {
 
   const canSend = hasSmtp;
   if (!canSend) {
-    console.log(`[BRIX] Sem SMTP — código dev: ${code} para ${cleanUsername}@${domain}`);
+    console.log(`[BRIX] Sem SMTP — código gerado para ${cleanUsername}@${domain} (verifique logs locais)`);
   }
 
   res.json({
@@ -331,7 +331,7 @@ router.post('/resend', async (req, res) => {
     INSERT INTO brix_verifications (id, user_id, code, type, destination, expires_at)
     VALUES (?, ?, ?, ?, ?, ?)
   `).run(verificationId, user_id, code, verifyVia, destination, expiresAt);
-  console.log(`[BRIX] Novo código para ${destination}: ${code}`);
+  console.log(`[BRIX] Novo código enviado para ${destination}`);
 
   let sent = false;
   if (resendEmail && hasSmtp) {
@@ -505,15 +505,8 @@ router.get('/address/:pubkey', (req, res) => {
   }
 
   const domain = process.env.BRIX_DOMAIN || 'brix.app';
-  // Only return sensitive contact info to the owner (authenticated via header)
-  const authedPubkey = req.headers['x-nostr-pubkey'];
-  const isOwner = authedPubkey === pubkey;
-  const response = { brix_address: `${user.username}@${domain}`, username: user.username };
-  if (isOwner) {
-    response.phone = decrypt(user.phone);
-    response.email = decrypt(user.email);
-  }
-  res.json(response);
+  // Never return PII via API — app has contact info locally
+  res.json({ brix_address: `${user.username}@${domain}`, username: user.username });
 });
 
 /**
@@ -660,6 +653,10 @@ router.post('/submit-invoice', (req, res) => {
  */
 router.get('/invoice-requests/:pubkey', (req, res) => {
   const { pubkey } = req.params;
+  const authedPubkey = req.headers['x-nostr-pubkey'];
+  if (!authedPubkey || authedPubkey !== pubkey) {
+    return res.status(403).json({ error: 'Não autorizado' });
+  }
   const db = getDb();
 
   // Get ALL users with same pubkey (handles multiple usernames per device)
@@ -741,7 +738,7 @@ router.post('/update-contact', async (req, res) => {
     INSERT INTO brix_verifications (id, user_id, code, type, destination, expires_at)
     VALUES (?, ?, ?, ?, ?, ?)
   `).run(verificationId, user.id, code, verifyVia, destination, expiresAt);
-  console.log(`[BRIX] Update-contact code for ${destination}: ${code}`);
+  console.log(`[BRIX] Update-contact code enviado para ${destination}`);
 
   let sent = false;
   if (cleanEmail && hasSmtp) {
