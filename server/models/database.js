@@ -234,16 +234,6 @@ function initialize() {
     console.error('[DB] PII encryption migration error:', migrationErr.message);
   }
 
-  // One-time fix: link carol to correct pubkey (same device as quizzicarol)
-  try {
-    const carol = conn.prepare("SELECT id, nostr_pubkey FROM brix_users WHERE username = 'carol' AND verified = 1").get();
-    const quizzicarol = conn.prepare("SELECT nostr_pubkey FROM brix_users WHERE username = 'quizzicarol' AND verified = 1").get();
-    if (carol && quizzicarol && carol.nostr_pubkey !== quizzicarol.nostr_pubkey) {
-      conn.prepare("UPDATE brix_users SET nostr_pubkey = ? WHERE id = ?").run(quizzicarol.nostr_pubkey, carol.id);
-      console.log(`[DB] Fixed carol pubkey: ${carol.nostr_pubkey.substring(0, 16)} -> ${quizzicarol.nostr_pubkey.substring(0, 16)}`);
-    }
-  } catch (e) { /* ignore */ }
-
   console.log('BRIX database initialized');
 }
 
