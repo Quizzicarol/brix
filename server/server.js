@@ -49,6 +49,18 @@ app.use('/brix/verify', authLimiter);
 app.use('/brix/resend', authLimiter);
 app.use('/brix/update-contact', authLimiter);
 
+// Rate limiting for lookup endpoints (prevent enumeration/scraping)
+const lookupLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many lookup requests, please try again later' },
+});
+app.use('/brix/resolve', lookupLimiter);
+app.use('/brix/find-by-email', lookupLimiter);
+app.use('/brix/register-push', lookupLimiter);
+
 // Serve static web frontend
 app.use(express.static(path.join(__dirname, '..', 'web')));
 

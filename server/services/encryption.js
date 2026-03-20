@@ -9,9 +9,16 @@ const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
 
+let _keyWarningLogged = false;
 function getKey() {
   const hex = process.env.BRIX_ENCRYPTION_KEY;
-  if (!hex || hex.length !== 64) return null;
+  if (!hex || hex.length !== 64) {
+    if (!_keyWarningLogged) {
+      console.warn('[SECURITY] BRIX_ENCRYPTION_KEY not set or invalid! PII data is NOT encrypted at rest.');
+      _keyWarningLogged = true;
+    }
+    return null;
+  }
   return Buffer.from(hex, 'hex');
 }
 
