@@ -152,8 +152,8 @@ router.post('/register', async (req, res) => {
     db.prepare(`
       INSERT INTO brix_verifications (id, user_id, code, type, destination, expires_at)
       VALUES (?, ?, ?, ?, ?, ?)
-    `).run(verificationId, userId, code, verifyVia, destination, expiresAt);
-    console.log(`[BRIX] Código de verificação (re-registro) enviado para ${destination}`);
+    `).run(verificationId, userId, code, verifyVia, encrypt(destination), expiresAt);
+    console.log(`[BRIX] Código de verificação (re-registro) enviado para ${cleanUsername} via ${verifyVia}`);
 
     let sent = false;
     if (verifyVia === 'email' && cleanEmail && hasSmtp) {
@@ -203,9 +203,9 @@ router.post('/register', async (req, res) => {
   db.prepare(`
     INSERT INTO brix_verifications (id, user_id, code, type, destination, expires_at)
     VALUES (?, ?, ?, ?, ?, ?)
-  `).run(verificationId, userId, code, verifyVia, destination, expiresAt);
+  `).run(verificationId, userId, code, verifyVia, encrypt(destination), expiresAt);
 
-  console.log(`[BRIX] Código de verificação enviado para ${destination}`);
+  console.log(`[BRIX] Código de verificação enviado para ${cleanUsername} via ${verifyVia}`);
 
   let sent = false;
   if (cleanEmail && hasSmtp) {
@@ -330,8 +330,8 @@ router.post('/resend', async (req, res) => {
   db.prepare(`
     INSERT INTO brix_verifications (id, user_id, code, type, destination, expires_at)
     VALUES (?, ?, ?, ?, ?, ?)
-  `).run(verificationId, user_id, code, verifyVia, destination, expiresAt);
-  console.log(`[BRIX] Novo código enviado para ${destination}`);
+  `).run(verificationId, user_id, code, verifyVia, encrypt(destination), expiresAt);
+  console.log(`[BRIX] Novo código enviado para user ${user_id.slice(0,8)} via ${verifyVia}`);
 
   let sent = false;
   if (resendEmail && hasSmtp) {
@@ -514,9 +514,14 @@ router.get('/address/:pubkey', (req, res) => {
  * Find a BRIX by email (used by app to find web-created BRIX)
  */
 router.get('/find-by-email/:email', (req, res) => {
+  const authedPubkey = req.verifiedPubkey;
+  if (!authedPubkey) {
+    return res.status(401).json({ error: 'Autenticação NIP-98 obrigatória' });
+  }
+
   const email = req.params.email.trim().toLowerCase();
   const db = getDb();
-  const user = db.prepare('SELECT username, phone, email, nostr_pubkey FROM brix_users WHERE email_hash = ? AND verified = 1').get(hmacHash(email));
+  const user = db.prepare('SELECT username, nostr_pubkey FROM brix_users WHERE email_hash = ? AND verified = 1').get(hmacHash(email));
 
   if (!user) {
     return res.status(404).json({ error: 'Nenhum BRIX encontrado' });
@@ -581,6 +586,12 @@ router.get('/resolve/:query', (req, res) => {
         return res.json({ found: true, brix_address: `${user.username}@${domain}`, username: user.username, matched_by: 'brix_address' });
       }
     }
+  }
+
+  // Phone/email lookup requires NIP-98 authentication
+  const authedPubkey = req.verifiedPubkey;
+  if (!authedPubkey) {
+    return res.json({ found: false });
   }
 
   // Try email
@@ -683,14 +694,14 @@ router.get('/invoice-requests/:pubkey', (req, res) => {
  * POST /brix/update-contact
  * Step 1: Request contact change (sends verification code to NEW contact)
  * Body: { phone?, email? }
- * Header: x-nostr-pubkey
+ * Requires NIP-98 cryptographic authentication
  */
 router.post('/update-contact', async (req, res) => {
   const { phone, email } = req.body;
-  const nostr_pubkey = req.headers['x-nostr-pubkey'];
+  const nostr_pubkey = req.verifiedPubkey;
 
   if (!nostr_pubkey) {
-    return res.status(401).json({ error: 'Autenticação obrigatória' });
+    return res.status(401).json({ error: 'Autenticação NIP-98 obrigatória' });
   }
   if (!phone && !email) {
     return res.status(400).json({ error: 'Informe o novo celular ou email' });
@@ -737,8 +748,8 @@ router.post('/update-contact', async (req, res) => {
   db.prepare(`
     INSERT INTO brix_verifications (id, user_id, code, type, destination, expires_at)
     VALUES (?, ?, ?, ?, ?, ?)
-  `).run(verificationId, user.id, code, verifyVia, destination, expiresAt);
-  console.log(`[BRIX] Update-contact code enviado para ${destination}`);
+  `).run(verificationId, user.id, code, verifyVia, encrypt(destination), expiresAt);
+  console.log(`[BRIX] Update-contact code enviado para user ${user.id.slice(0,8)} via ${verifyVia}`);
 
   let sent = false;
   if (cleanEmail && hasSmtp) {
@@ -761,14 +772,14 @@ router.post('/update-contact', async (req, res) => {
  * POST /brix/confirm-update
  * Step 2: Confirm contact change with verification code
  * Body: { code, phone?, email? }
- * Header: x-nostr-pubkey
+ * Requires NIP-98 cryptographic authentication
  */
 router.post('/confirm-update', async (req, res) => {
   const { code, phone, email } = req.body;
-  const nostr_pubkey = req.headers['x-nostr-pubkey'];
+  const nostr_pubkey = req.verifiedPubkey;
 
   if (!nostr_pubkey || !code) {
-    return res.status(400).json({ error: 'Campos obrigatórios: code' });
+    return res.status(400).json({ error: 'Autenticação NIP-98 e código obrigatórios' });
   }
 
   const db = getDb();
