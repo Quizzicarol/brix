@@ -10,27 +10,32 @@ const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
 
 let _keyWarningLogged = false;
+let _keyValidated = false;
 function getKey() {
   const hex = process.env.BRIX_ENCRYPTION_KEY;
   if (!hex || hex.length !== 64) {
     if (!_keyWarningLogged) {
-      console.warn('[SECURITY] BRIX_ENCRYPTION_KEY not set or invalid! PII data is NOT encrypted at rest.');
+      console.error('[SECURITY] FATAL: BRIX_ENCRYPTION_KEY not set or invalid! PII encryption disabled.');
       _keyWarningLogged = true;
     }
     return null;
+  }
+  if (!_keyValidated) {
+    console.log('[SECURITY] BRIX_ENCRYPTION_KEY validated — PII encryption active');
+    _keyValidated = true;
   }
   return Buffer.from(hex, 'hex');
 }
 
 /**
- * Encrypt a plaintext string. Returns null if encryption key not configured.
+ * Encrypt a plaintext string. Throws if encryption key not configured.
  * @param {string} plaintext
  * @returns {string|null} encrypted string in format "iv:tag:ciphertext" or null
  */
 function encrypt(plaintext) {
   if (!plaintext) return null;
   const key = getKey();
-  if (!key) return plaintext; // passthrough if no key configured
+  if (!key) throw new Error('BRIX_ENCRYPTION_KEY not configured — refusing to store plaintext PII');
   const iv = crypto.randomBytes(IV_LENGTH);
   const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
   const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
@@ -73,7 +78,7 @@ function decrypt(ciphertext) {
 function hmacHash(value) {
   if (!value) return null;
   const key = getKey();
-  if (!key) return value; // passthrough if no key
+  if (!key) throw new Error('BRIX_ENCRYPTION_KEY not configured — refusing to hash without key');
   return crypto.createHmac('sha256', key).update(value).digest('hex');
 }
 

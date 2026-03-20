@@ -120,11 +120,13 @@ router.get('/:identifier/callback', async (req, res) => {
     if (hasFcm || recentlySeen) {
       console.log(`[LNURL] Request ${requestId} for ${lnAddress}: ${amountSats} sats (source=${source || 'external'}) — waiting for app... (fcm=${hasFcm}, recentlySeen=${recentlySeen})`);
 
-      // ── First try: quick poll (app may already be online polling) ──
-      const QUICK_TIMEOUT = 8000;
-      sparkInvoice = await pollForInvoice(db, requestId, QUICK_TIMEOUT);
+      if (recentlySeen) {
+        // App is actively polling — should respond quickly
+        const QUICK_TIMEOUT = 8000;
+        sparkInvoice = await pollForInvoice(db, requestId, QUICK_TIMEOUT);
+      }
 
-      // ── If no response, send push notification to wake up the app ──
+      // ── If not recently seen or quick poll failed, send push immediately ──
       if (!sparkInvoice) {
         let pushSent = await sendWakeUpPush(fcmUserId, requestId, amountSats);
 
