@@ -93,8 +93,27 @@ router.get('/:identifier/callback', async (req, res) => {
     `).run(requestId, user.id, amountSats);
 
     // Check if user's app is reachable (has FCM token or was recently seen polling)
-    const recentlySeen = user.last_seen && (Date.now() - new Date(user.last_seen + 'Z').getTime()) < 30000;
-    const hasFcm = !!user.fcm_token;
+    // Also check sibling users with same pubkey (multiple usernames, same device)
+    let recentlySeen = user.last_seen && (Date.now() - new Date(user.last_seen + 'Z').getTime()) < 30000;
+    let hasFcm = !!user.fcm_token;
+    let fcmUserId = user.id;
+
+    // If this user has no FCM/recentlySeen, check siblings with same pubkey
+    if ((!hasFcm || !recentlySeen) && user.nostr_pubkey && !user.nostr_pubkey.startsWith('web_')) {
+      const sibling = db.prepare(
+        'SELECT id, fcm_token, last_seen FROM brix_users WHERE nostr_pubkey = ? AND id != ? AND verified = 1 ORDER BY last_seen DESC LIMIT 1'
+      ).get(user.nostr_pubkey, user.id);
+      if (sibling) {
+        if (!hasFcm && sibling.fcm_token) {
+          hasFcm = true;
+          fcmUserId = sibling.id;
+          console.log(`[LNURL] Using sibling FCM token for ${identifier}`);
+        }
+        if (!recentlySeen && sibling.last_seen && (Date.now() - new Date(sibling.last_seen + 'Z').getTime()) < 30000) {
+          recentlySeen = true;
+        }
+      }
+    }
 
     let sparkInvoice = null;
 
@@ -107,18 +126,7 @@ router.get('/:identifier/callback', async (req, res) => {
 
       // ── If no response, send push notification to wake up the app ──
       if (!sparkInvoice) {
-        let pushSent = await sendWakeUpPush(user.id, requestId, amountSats);
-
-        // If this user has no FCM token, try sibling users with same pubkey
-        if (!pushSent && user.nostr_pubkey) {
-          const sibling = db.prepare(
-            'SELECT id FROM brix_users WHERE nostr_pubkey = ? AND id != ? AND fcm_token IS NOT NULL AND verified = 1'
-          ).get(user.nostr_pubkey, user.id);
-          if (sibling) {
-            console.log(`[LNURL] No FCM token for ${identifier}, trying sibling user...`);
-            pushSent = await sendWakeUpPush(sibling.id, requestId, amountSats);
-          }
-        }
+        let pushSent = await sendWakeUpPush(fcmUserId, requestId, amountSats);
 
         if (pushSent) {
           console.log(`[LNURL] Push sent to ${lnAddress}, extending timeout for background SDK init...`);

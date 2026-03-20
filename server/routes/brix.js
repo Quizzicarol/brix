@@ -473,9 +473,9 @@ router.post('/link-pubkey', (req, res) => {
     return res.status(403).json({ error: 'Não autorizado a vincular esta chave' });
   }
 
-  // Check if pubkey already has a different BRIX
+  // Allow same pubkey for multiple usernames when caller is the owner
   const existingPubkey = db.prepare('SELECT username FROM brix_users WHERE nostr_pubkey = ? AND verified = 1 AND username != ?').get(nostr_pubkey, cleanUsername);
-  if (existingPubkey) {
+  if (existingPubkey && currentPubkey !== nostr_pubkey) {
     return res.status(409).json({ error: `Esta chave já está vinculada ao username "${existingPubkey.username}"` });
   }
 
@@ -839,6 +839,50 @@ router.post('/register-push', (req, res) => {
 
   console.log(`[PUSH] FCM token registered for ${result.changes} user(s) with pubkey ${pubkey.slice(0, 8)}...`);
   res.json({ success: true });
+});
+
+/**
+ * POST /brix/claim-web-accounts
+ * Finds all web-created BRIX accounts with the same email as the caller
+ * and links them to the caller's nostr pubkey.
+ */
+router.post('/claim-web-accounts', (req, res) => {
+  const pubkey = req.headers['x-nostr-pubkey'];
+  if (!pubkey) {
+    return res.status(401).json({ error: 'Missing x-nostr-pubkey header' });
+  }
+
+  const db = getDb();
+
+  // Find caller's user record to get their email_hash
+  const caller = db.prepare(
+    'SELECT id, email_hash FROM brix_users WHERE nostr_pubkey = ? AND verified = 1 LIMIT 1'
+  ).get(pubkey);
+  if (!caller || !caller.email_hash) {
+    return res.json({ linked: [], count: 0 });
+  }
+
+  // Find all web-created accounts with same email that haven't been linked yet
+  const webAccounts = db.prepare(
+    "SELECT id, username FROM brix_users WHERE email_hash = ? AND nostr_pubkey LIKE 'web_%' AND verified = 1 AND id != ?"
+  ).all(caller.email_hash, caller.id);
+
+  if (webAccounts.length === 0) {
+    return res.json({ linked: [], count: 0 });
+  }
+
+  const updateStmt = db.prepare(
+    "UPDATE brix_users SET nostr_pubkey = ?, updated_at = datetime('now') WHERE id = ?"
+  );
+
+  const linked = [];
+  for (const account of webAccounts) {
+    updateStmt.run(pubkey, account.id);
+    linked.push(account.username);
+    console.log(`[BRIX] Auto-linked web account: ${account.username} -> pubkey ${pubkey.substring(0, 16)}...`);
+  }
+
+  res.json({ linked, count: linked.length });
 });
 
 module.exports = router;
