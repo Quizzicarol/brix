@@ -121,18 +121,18 @@ router.get('/:identifier/callback', async (req, res) => {
         }
 
         if (pushSent) {
-          console.log(`[LNURL] Push sent to ${lnAddress}, extending timeout...`);
+          console.log(`[LNURL] Push sent to ${lnAddress}, extending timeout for background SDK init...`);
         } else {
           console.log(`[LNURL] No push available for ${lnAddress}, polling anyway...`);
         }
-        // Extended poll — app may respond after FCM wake-up
-        const PUSH_TIMEOUT = 30000;
+        // Extended poll — app needs time for background SDK cold-start + invoice generation
+        const PUSH_TIMEOUT = 55000;
         sparkInvoice = await pollForInvoice(db, requestId, PUSH_TIMEOUT);
       }
     } else {
       // No FCM and not recently seen — still try polling, app might come online
       console.log(`[LNURL] User ${identifier} has no FCM token and app not recently seen — polling with extended timeout`);
-      const EXTENDED_TIMEOUT = 45000;
+      const EXTENDED_TIMEOUT = 55000;
       sparkInvoice = await pollForInvoice(db, requestId, EXTENDED_TIMEOUT);
     }
 
