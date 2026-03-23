@@ -120,25 +120,19 @@ router.get('/:identifier/callback', async (req, res) => {
     if (hasFcm || recentlySeen) {
       console.log(`[LNURL] Request ${requestId} for ${lnAddress}: ${amountSats} sats (source=${source || 'external'}) — waiting for app... (fcm=${hasFcm}, recentlySeen=${recentlySeen})`);
 
-      if (recentlySeen) {
-        // App is actively polling — should respond quickly
-        const QUICK_TIMEOUT = 8000;
-        sparkInvoice = await pollForInvoice(db, requestId, QUICK_TIMEOUT);
+      // Always send FCM push immediately (in parallel with polling)
+      // so the app wakes up ASAP even if it missed a poll cycle
+      if (hasFcm) {
+        sendWakeUpPush(fcmUserId, requestId, amountSats).then(sent => {
+          if (sent) console.log(`[LNURL] Push sent to ${lnAddress}`);
+        }).catch(() => {});
       }
 
-      // ── If not recently seen or quick poll failed, send push immediately ──
-      if (!sparkInvoice) {
-        let pushSent = await sendWakeUpPush(fcmUserId, requestId, amountSats);
-
-        if (pushSent) {
-          console.log(`[LNURL] Push sent to ${lnAddress}, extending timeout for background SDK init...`);
-        } else {
-          console.log(`[LNURL] No push available for ${lnAddress}, polling anyway...`);
-        }
-        // Extended poll — app needs time for background SDK cold-start + invoice generation
-        const PUSH_TIMEOUT = 55000;
-        sparkInvoice = await pollForInvoice(db, requestId, PUSH_TIMEOUT);
-      }
+      // Single poll with appropriate timeout
+      // Recently seen (app actively polling): 12s should be plenty
+      // Not recently seen (needs FCM wake): 55s for cold SDK init
+      const timeout = recentlySeen ? 12000 : 55000;
+      sparkInvoice = await pollForInvoice(db, requestId, timeout);
     } else {
       // No FCM and not recently seen — still try polling, app might come online
       console.log(`[LNURL] User ${identifier} has no FCM token and app not recently seen — polling with extended timeout`);
@@ -181,7 +175,7 @@ router.get('/:identifier/callback', async (req, res) => {
 // ── Helper ──
 
 function pollForInvoice(db, requestId, timeoutMs = 25000) {
-  const POLL_INTERVAL = 500;
+  const POLL_INTERVAL = 200;
   const startTime = Date.now();
 
   return new Promise((resolve) => {
