@@ -32,6 +32,7 @@ const FEE_ENABLED = process.env.BRIX_FEE_ENABLED === 'true';
 const WALLET_PROVIDER = process.env.WALLET_PROVIDER || 'mock';
 const WALLET_MODE = process.env.WALLET_MODE || 'regular';
 
+
 let walletConfig = null;
 
 function getWalletConfig() {
@@ -49,7 +50,7 @@ function getWalletConfig() {
       const adminKey = process.env.LNBITS_ADMIN_KEY;
 
       if (!walletUrl || !invoiceKey || !adminKey) {
-        console.warn('[WALLET] LNbits config incomplete — fee disabled');
+        console.warn('[WALLET] LNbits config incomplete — wallet disabled');
         walletConfig = false;
         return false;
       }
@@ -64,7 +65,7 @@ function getWalletConfig() {
     }
 
     default:
-      console.warn(`[WALLET] Unknown provider "${WALLET_PROVIDER}" — fee disabled`);
+      console.warn(`[WALLET] Unknown provider "${WALLET_PROVIDER}" — wallet disabled`);
       walletConfig = false;
       return false;
   }

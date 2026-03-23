@@ -42,12 +42,20 @@ app.use(express.json());
 // NIP-98 HTTP Auth — verify signed requests (backward-compatible)
 app.use(nip98Auth);
 
-// Global rate limiting
+// Global rate limiting (high enough for relay polling at ~1.5s intervals)
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 200,
+  max: 1500,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => {
+    // Skip rate limiting for relay polling and LNURL (time-critical paths)
+    return req.path.startsWith('/brix/invoice-requests') ||
+           req.path.startsWith('/brix/submit-invoice') ||
+           req.path.startsWith('/.well-known/lnurlp') ||
+           req.path.startsWith('/lnurlp') ||
+           req.path === '/health';
+  },
 });
 app.use(limiter);
 
@@ -75,7 +83,6 @@ const lookupLimiter = rateLimit({
 });
 app.use('/brix/resolve', lookupLimiter);
 app.use('/brix/find-by-email', lookupLimiter);
-app.use('/brix/register-push', lookupLimiter);
 
 // Serve static web frontend
 app.use(express.static(path.join(__dirname, '..', 'web')));
@@ -94,8 +101,67 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'brix-server', version: '0.2.0' });
 });
 
+// Admin-only debug endpoint — requires NIP-98 auth from ADMIN_PUBKEY
+const ADMIN_PUBKEY = process.env.ADMIN_PUBKEY || '';
+app.get('/debug/brix-status', (req, res) => {
+  if (!req.verifiedPubkey || req.verifiedPubkey !== ADMIN_PUBKEY) {
+    return res.status(403).json({ error: 'admin auth required' });
+  }
+  try {
+    const conn = db.getDb();
+    const users = conn.prepare(`
+      SELECT username, nostr_pubkey, last_seen, verified, created_at
+      FROM brix_users ORDER BY last_seen DESC LIMIT 20
+    `).all();
+    const recentRequests = conn.prepare(`
+      SELECT ir.id, ir.user_id, ir.amount_sats, ir.status, ir.created_at, ir.updated_at,
+             u.username
+      FROM brix_invoice_requests ir
+      LEFT JOIN brix_users u ON u.id = ir.user_id
+      ORDER BY ir.created_at DESC LIMIT 20
+    `).all();
+    const recentPayments = conn.prepare(`
+      SELECT id, user_id, amount_sats, status, created_at
+      FROM brix_pending_payments
+      ORDER BY created_at DESC LIMIT 20
+    `).all();
+    res.json({ users, recentRequests, recentPayments });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Initialize database and start
 db.initialize();
+
+// One-time fix: carol's nostr_pubkey was incorrectly set to quizzicarol's pubkey
+try {
+  const conn = db.getDb();
+  const carolCorrectPubkey = '0b31181f021539d1afcda76e66577d5a7797a9603ac4a7aa46514745c8acfc26';
+  const carol = conn.prepare('SELECT nostr_pubkey FROM brix_users WHERE username = ? AND verified = 1').get('carol');
+  if (carol && carol.nostr_pubkey !== carolCorrectPubkey) {
+    conn.prepare('UPDATE brix_users SET nostr_pubkey = ? WHERE username = ? AND verified = 1').run(carolCorrectPubkey, 'carol');
+    console.log(`[FIX] Updated carol's nostr_pubkey from ${carol.nostr_pubkey?.substring(0,16)}... to ${carolCorrectPubkey.substring(0,16)}...`);
+  } else if (carol) {
+    console.log('[FIX] carol pubkey already correct');
+  }
+} catch (e) {
+  console.log('[FIX] Error fixing carol pubkey:', e.message);
+}
+
+// Startup diagnostic: check user states
+try {
+  const conn = db.getDb();
+  const users = conn.prepare(`
+    SELECT username, nostr_pubkey, last_seen, verified, fcm_token IS NOT NULL as has_fcm
+    FROM brix_users WHERE verified = 1 ORDER BY last_seen DESC LIMIT 10
+  `).all();
+  for (const u of users) {
+    console.log(`[STARTUP] user=${u.username} pubkey=${u.nostr_pubkey?.substring(0,16)}... last_seen=${u.last_seen} fcm=${u.has_fcm} verified=${u.verified}`);
+  }
+} catch (e) {
+  console.log('[STARTUP] Diagnostic error:', e.message);
+}
 
 app.listen(PORT, HOST, () => {
   console.log(`BRIX server running on http://${HOST}:${PORT}`);

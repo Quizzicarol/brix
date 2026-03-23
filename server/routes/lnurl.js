@@ -61,7 +61,7 @@ router.get('/:identifier', (req, res) => {
  */
 router.get('/:identifier/callback', async (req, res) => {
   const { identifier } = req.params;
-  const { amount, comment, source } = req.query;
+  const { amount, comment, source, sender } = req.query;
   const db = getDb();
 
   const amountMsats = parseInt(amount, 10);
@@ -86,15 +86,18 @@ router.get('/:identifier/callback', async (req, res) => {
     const sanitizedComment = comment ? String(comment).slice(0, 140) : null;
 
     // ── Create invoice request for app to fulfill ──
+    // If sender pubkey is provided (internal BRIX→BRIX send), store it so
+    // the sender's own relay doesn't intercept this request
+    const senderPubkey = (sender && /^[0-9a-f]{64}$/.test(sender)) ? sender : null;
     const requestId = crypto.randomUUID();
     db.prepare(`
-      INSERT INTO brix_invoice_requests (id, user_id, amount_sats, status)
-      VALUES (?, ?, ?, 'pending')
-    `).run(requestId, user.id, amountSats);
+      INSERT INTO brix_invoice_requests (id, user_id, amount_sats, status, sender_pubkey)
+      VALUES (?, ?, ?, 'pending', ?)
+    `).run(requestId, user.id, amountSats, senderPubkey);
 
     // Check if user's app is reachable (has FCM token or was recently seen polling)
     // Also check sibling users with same pubkey (multiple usernames, same device)
-    let recentlySeen = user.last_seen && (Date.now() - new Date(user.last_seen + 'Z').getTime()) < 30000;
+    let recentlySeen = user.last_seen && (Date.now() - new Date(user.last_seen + 'Z').getTime()) < 120000;
     let hasFcm = !!user.fcm_token;
     let fcmUserId = user.id;
 
@@ -109,7 +112,7 @@ router.get('/:identifier/callback', async (req, res) => {
           fcmUserId = sibling.id;
           console.log(`[LNURL] Using sibling FCM token for ${identifier}`);
         }
-        if (!recentlySeen && sibling.last_seen && (Date.now() - new Date(sibling.last_seen + 'Z').getTime()) < 30000) {
+        if (!recentlySeen && sibling.last_seen && (Date.now() - new Date(sibling.last_seen + 'Z').getTime()) < 120000) {
           recentlySeen = true;
         }
       }
@@ -129,9 +132,10 @@ router.get('/:identifier/callback', async (req, res) => {
       }
 
       // Single poll with appropriate timeout
-      // Recently seen (app actively polling): 12s should be plenty
+      // Recently seen (app actively polling): 45s — app polls every 1.5s but
+      // createInvoice can take up to 30s (Spark SDK timeout + sync)
       // Not recently seen (needs FCM wake): 55s for cold SDK init
-      const timeout = recentlySeen ? 12000 : 55000;
+      const timeout = recentlySeen ? 45000 : 55000;
       sparkInvoice = await pollForInvoice(db, requestId, timeout);
     } else {
       // No FCM and not recently seen — still try polling, app might come online
@@ -155,7 +159,7 @@ router.get('/:identifier/callback', async (req, res) => {
       });
     }
 
-    // ── App didn't respond — payment cannot proceed without Spark invoice ──
+    // ── App didn't respond — payment cannot proceed ──
     db.prepare(`UPDATE brix_invoice_requests SET status = 'expired' WHERE id = ?`).run(requestId);
     console.log(`[LNURL] ✗ App offline for ${lnAddress} — no Spark invoice generated. Payment cannot proceed.`);
 

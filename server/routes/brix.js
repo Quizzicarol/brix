@@ -498,15 +498,21 @@ router.post('/link-pubkey', (req, res) => {
 router.get('/address/:pubkey', (req, res) => {
   const { pubkey } = req.params;
   const db = getDb();
-  const user = db.prepare('SELECT username, phone, email FROM brix_users WHERE nostr_pubkey = ? AND verified = 1').get(pubkey);
+  const users = db.prepare('SELECT username, phone, email FROM brix_users WHERE nostr_pubkey = ? AND verified = 1 ORDER BY created_at ASC').all(pubkey);
 
-  if (!user) {
+  if (!users.length) {
     return res.status(404).json({ error: 'Nenhum BRIX registrado' });
   }
 
   const domain = process.env.BRIX_DOMAIN || 'brix.app';
-  // Never return PII via API — app has contact info locally
-  res.json({ brix_address: `${user.username}@${domain}`, username: user.username });
+  const primary = users[0];
+  // Return primary + list of all usernames for this pubkey
+  const allUsernames = users.map(u => u.username);
+  res.json({
+    brix_address: `${primary.username}@${domain}`,
+    username: primary.username,
+    all_usernames: allUsernames,
+  });
 });
 
 /**
@@ -570,10 +576,12 @@ router.get('/resolve/:query', (req, res) => {
   const query = req.params.query.trim().toLowerCase();
   const db = getDb();
   const domain = process.env.BRIX_DOMAIN || 'brix.app';
+  const callerPubkey = req.headers['x-nostr-pubkey'] || req.verifiedPubkey || 'anon';
 
   // Try username first
   let user = db.prepare('SELECT username FROM brix_users WHERE username = ? AND verified = 1').get(query);
   if (user) {
+    console.log(`[RESOLVE] ${query} → ${user.username}@${domain} (by=username, caller=${callerPubkey.substring(0, 8)})`);
     return res.json({ found: true, brix_address: `${user.username}@${domain}`, username: user.username, matched_by: 'username' });
   }
 
@@ -623,6 +631,7 @@ router.get('/resolve/:query', (req, res) => {
     }
   }
 
+  console.log(`[RESOLVE] ${query} → NOT FOUND (caller=${callerPubkey.substring(0, 8)})`);
   res.json({ found: false });
 });
 
@@ -648,6 +657,14 @@ router.post('/submit-invoice', (req, res) => {
   `).get(request_id, nostr_pubkey);
 
   if (!request) {
+    // Diagnostic: check why not found
+    const irOnly = db.prepare('SELECT status, user_id FROM brix_invoice_requests WHERE id = ?').get(request_id);
+    if (irOnly) {
+      const irUser = db.prepare('SELECT nostr_pubkey, username FROM brix_users WHERE id = ?').get(irOnly.user_id);
+      console.log(`[SUBMIT-DIAG] request ${request_id.substring(0,8)} NOT matched: status=${irOnly.status}, db_pubkey=${irUser?.nostr_pubkey?.substring(0,8)}..., submitted_pubkey=${nostr_pubkey.substring(0,8)}..., username=${irUser?.username}`);
+    } else {
+      console.log(`[SUBMIT-DIAG] request ${request_id.substring(0,8)} NOT FOUND in DB`);
+    }
     return res.status(404).json({ error: 'Solicitação não encontrada' });
   }
 
@@ -664,29 +681,62 @@ router.post('/submit-invoice', (req, res) => {
  */
 router.get('/invoice-requests/:pubkey', (req, res) => {
   const { pubkey } = req.params;
+  const username = req.query.username; // Optional: filter to specific BRIX account
   const authedPubkey = req.headers['x-nostr-pubkey'];
   if (!authedPubkey || authedPubkey !== pubkey) {
     return res.status(403).json({ error: 'Não autorizado' });
   }
   const db = getDb();
 
-  // Get ALL users with same pubkey (handles multiple usernames per device)
-  const users = db.prepare('SELECT id FROM brix_users WHERE nostr_pubkey = ? AND verified = 1').all(pubkey);
+  let users;
+  if (username) {
+    // If username provided, only get that specific user (prevents cross-account leaks)
+    users = db.prepare('SELECT id FROM brix_users WHERE nostr_pubkey = ? AND username = ? AND verified = 1').all(pubkey, username);
+    if (!users.length) {
+      // Diagnostic: check if user exists with different pubkey
+      const altUser = db.prepare('SELECT nostr_pubkey, verified FROM brix_users WHERE username = ?').get(username);
+      if (altUser) {
+        console.log(`[POLL-DIAG] ${username} found BUT nostr_pubkey mismatch! DB=${altUser.nostr_pubkey?.substring(0,8)}... poll=${pubkey.substring(0,8)}... verified=${altUser.verified}`);
+      } else {
+        console.log(`[POLL-DIAG] ${username} NOT FOUND in brix_users at all`);
+      }
+    }
+  } else {
+    // Fallback: get ALL users with same pubkey (legacy clients without username)
+    users = db.prepare('SELECT id FROM brix_users WHERE nostr_pubkey = ? AND verified = 1').all(pubkey);
+  }
   if (!users.length) {
     return res.json({ requests: [] });
   }
 
-  // Update last_seen for all users with this pubkey (relay is actively polling)
+  // Update last_seen for ALL users with this pubkey (so sibling FCM check works in LNURL callback)
   db.prepare("UPDATE brix_users SET last_seen = datetime('now') WHERE nostr_pubkey = ? AND verified = 1").run(pubkey);
 
   const userIds = users.map(u => u.id);
   const placeholders = userIds.map(() => '?').join(',');
-  const requests = db.prepare(`
-    SELECT id, amount_sats, created_at FROM brix_invoice_requests
-    WHERE user_id IN (${placeholders}) AND status = 'pending' AND created_at > datetime('now', '-2 minutes')
-    ORDER BY created_at DESC
-  `).all(...userIds);
 
+  let requests;
+  if (username) {
+    // Per-username filtering already prevents self-invoicing (user_id scoped to this username)
+    // No sender_pubkey filter needed — allows same-pubkey users to receive from each other
+    requests = db.prepare(`
+      SELECT id, amount_sats, created_at FROM brix_invoice_requests
+      WHERE user_id IN (${placeholders}) AND status = 'pending' AND created_at > datetime('now', '-2 minutes')
+      ORDER BY created_at DESC
+    `).all(...userIds);
+  } else {
+    // Legacy clients without username: use sender_pubkey filter to prevent self-invoicing
+    requests = db.prepare(`
+      SELECT id, amount_sats, created_at FROM brix_invoice_requests
+      WHERE user_id IN (${placeholders}) AND status = 'pending' AND created_at > datetime('now', '-2 minutes')
+      AND (sender_pubkey IS NULL OR sender_pubkey != ?)
+      ORDER BY created_at DESC
+    `).all(...userIds, pubkey);
+  }
+
+  if (requests.length > 0) {
+    console.log(`[POLL] ${username || pubkey.substring(0,8)} has ${requests.length} pending request(s): ${requests.map(r => r.id.substring(0,8) + '=' + r.amount_sats + 'sats').join(', ')}`);
+  }
   res.json({ requests });
 });
 
