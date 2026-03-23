@@ -234,6 +234,17 @@ function initialize() {
     console.error('[DB] PII encryption migration error:', migrationErr.message);
   }
 
+  // Migration: add sender_pubkey column to brix_invoice_requests
+  // Prevents self-invoicing when sender and recipient share the same nostr pubkey
+  try {
+    const irInfo = conn.prepare(`SELECT sql FROM sqlite_master WHERE name = 'brix_invoice_requests'`).get();
+    if (irInfo && irInfo.sql && !irInfo.sql.includes('sender_pubkey')) {
+      console.log('[DB] Migrating brix_invoice_requests: adding sender_pubkey column...');
+      conn.exec(`ALTER TABLE brix_invoice_requests ADD COLUMN sender_pubkey TEXT`);
+      console.log('[DB] Migration complete: sender_pubkey added');
+    }
+  } catch (e) { /* column may already exist */ }
+
   console.log('BRIX database initialized');
 }
 
