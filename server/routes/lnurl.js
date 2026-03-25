@@ -10,6 +10,9 @@ const PROTOCOL = process.env.NODE_ENV === 'production' ? 'https' : 'http';
 const MIN_SENDABLE_MSATS = 1000;        // 1 sat
 const MAX_SENDABLE_MSATS = 1000000000;  // 1M sats
 
+// Concurrent poll limiter: max 5 active polls per user to prevent resource exhaustion
+const activePolls = new Map();
+
 /**
  * LUD-16: Lightning Address resolution
  * GET /.well-known/lnurlp/:identifier
@@ -84,6 +87,17 @@ router.get('/:identifier/callback', async (req, res) => {
     const amountSats = Math.floor(amountMsats / 1000);
     const lnAddress = `${identifier}@${DOMAIN}`;
     const sanitizedComment = comment ? String(comment).slice(0, 140) : null;
+
+    // Limit concurrent polls per user to prevent resource exhaustion
+    const pollKey = `user:${user.id}`;
+    const currentPolls = activePolls.get(pollKey) || 0;
+    if (currentPolls >= 5) {
+      return res.status(429).json({
+        status: 'ERROR',
+        reason: 'Too many pending payments for this user. Try again shortly.',
+      });
+    }
+    activePolls.set(pollKey, currentPolls + 1);
 
     // ── Create invoice request for app to fulfill ──
     // If sender pubkey is provided (internal BRIX→BRIX send), store it so
@@ -173,6 +187,15 @@ router.get('/:identifier/callback', async (req, res) => {
       status: 'ERROR',
       reason: 'Failed to generate invoice',
     });
+  } finally {
+    // Decrement concurrent poll counter
+    const pollKey = `user:${user.id}`;
+    const count = activePolls.get(pollKey) || 1;
+    if (count <= 1) {
+      activePolls.delete(pollKey);
+    } else {
+      activePolls.set(pollKey, count - 1);
+    }
   }
 });
 

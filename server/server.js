@@ -84,6 +84,18 @@ const lookupLimiter = rateLimit({
 app.use('/brix/resolve', lookupLimiter);
 app.use('/brix/find-by-email', lookupLimiter);
 
+// Rate limiting for LNURL callback (prevent DDoS via invoice request flooding)
+const lnurlCallbackLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.params.identifier || req.ip,
+  message: { status: 'ERROR', reason: 'Too many payment requests. Try again in a minute.' },
+});
+app.use('/.well-known/lnurlp/:identifier/callback', lnurlCallbackLimiter);
+app.use('/lnurlp/:identifier/callback', lnurlCallbackLimiter);
+
 // Serve static web frontend
 app.use(express.static(path.join(__dirname, '..', 'web')));
 
@@ -169,5 +181,21 @@ app.listen(PORT, HOST, () => {
   console.log(`API:    http://localhost:${PORT}/brix`);
   console.log(`LNURL:  http://localhost:${PORT}/.well-known/lnurlp/<identifier>`);
 });
+
+// Cleanup expired invoice requests daily (prevent DB bloat from DDoS/spam)
+setInterval(() => {
+  try {
+    const conn = db.getDb();
+    const result = conn.prepare(`
+      DELETE FROM brix_invoice_requests
+      WHERE status IN ('expired', 'completed') AND created_at < datetime('now', '-7 days')
+    `).run();
+    if (result.changes > 0) {
+      console.log(`[CLEANUP] Deleted ${result.changes} old invoice requests`);
+    }
+  } catch (e) {
+    console.error('[CLEANUP] Error:', e.message);
+  }
+}, 24 * 60 * 60 * 1000); // Every 24 hours
 
 module.exports = app;

@@ -881,11 +881,11 @@ router.post('/confirm-update', async (req, res) => {
  * Registers/updates the FCM push token for a user.
  */
 router.post('/register-push', (req, res) => {
-  const pubkey = req.headers['x-nostr-pubkey'];
+  const pubkey = req.verifiedPubkey;
   const { fcm_token } = req.body;
 
   if (!pubkey) {
-    return res.status(401).json({ error: 'Missing x-nostr-pubkey header' });
+    return res.status(401).json({ error: 'NIP-98 authentication required' });
   }
   if (!fcm_token || typeof fcm_token !== 'string' || fcm_token.length < 20) {
     return res.status(400).json({ error: 'Invalid FCM token' });
@@ -908,9 +908,9 @@ router.post('/register-push', (req, res) => {
  * and links them to the caller's nostr pubkey.
  */
 router.post('/claim-web-accounts', (req, res) => {
-  const pubkey = req.headers['x-nostr-pubkey'];
+  const pubkey = req.verifiedPubkey;
   if (!pubkey) {
-    return res.status(401).json({ error: 'Missing x-nostr-pubkey header' });
+    return res.status(401).json({ error: 'NIP-98 authentication required' });
   }
 
   const db = getDb();
