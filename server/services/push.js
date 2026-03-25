@@ -89,12 +89,12 @@ async function getAccessToken() {
  *
  * @param {string} fcmToken - The device FCM token
  * @param {object} data - Key-value data payload (strings only)
- * @returns {Promise<boolean>} success
+ * @returns {Promise<{sent: boolean, unregistered: boolean}>} result
  */
 async function sendPush(fcmToken, data) {
   if (!PROJECT_ID) {
     console.log('[PUSH] FCM_PROJECT_ID not configured, skipping push');
-    return false;
+    return { sent: false, unregistered: false };
   }
 
   try {
@@ -138,29 +138,31 @@ async function sendPush(fcmToken, data) {
         res.on('end', () => {
           if (res.statusCode === 200) {
             console.log('[PUSH] FCM message sent successfully');
-            resolve(true);
+            resolve({ sent: true, unregistered: false });
           } else {
+            const isUnregistered = data.includes('UNREGISTERED') || data.includes('NOT_FOUND');
             console.error('[PUSH] FCM error:', res.statusCode, data);
-            resolve(false);
+            resolve({ sent: false, unregistered: isUnregistered });
           }
         });
       });
       req.on('error', (err) => {
         console.error('[PUSH] FCM request error:', err.message);
-        resolve(false);
+        resolve({ sent: false, unregistered: false });
       });
       req.write(body);
       req.end();
     });
   } catch (err) {
     console.error('[PUSH] Failed to send push:', err.message);
-    return false;
+    return { sent: false, unregistered: false };
   }
 }
 
 /**
  * Send a wake-up push to a BRIX user by user ID.
  * Used when an LNURL payment request arrives and the recipient is offline.
+ * Automatically clears stale (UNREGISTERED) FCM tokens from the database.
  *
  * @param {string} userId - The brix_users.id
  * @param {string} requestId - The invoice request ID
@@ -178,11 +180,19 @@ async function sendWakeUpPush(userId, requestId, amountSats) {
 
   console.log(`[PUSH] Sending wake-up push to ${user.username} for request ${requestId} (${amountSats} sats)`);
 
-  return sendPush(user.fcm_token, {
+  const result = await sendPush(user.fcm_token, {
     type: 'brix_invoice_request',
     request_id: requestId,
     amount_sats: String(amountSats),
   });
+
+  // Clear stale tokens so we don't keep trying dead FCM tokens
+  if (result.unregistered) {
+    console.log(`[PUSH] Clearing stale FCM token for ${user.username} (UNREGISTERED)`);
+    db.prepare("UPDATE brix_users SET fcm_token = NULL WHERE id = ?").run(userId);
+  }
+
+  return result.sent;
 }
 
 module.exports = { sendPush, sendWakeUpPush };
