@@ -140,7 +140,7 @@ async function sendPush(fcmToken, data) {
             console.log('[PUSH] FCM message sent successfully');
             resolve({ sent: true, unregistered: false });
           } else {
-            const isUnregistered = data.includes('UNREGISTERED') || data.includes('NOT_FOUND');
+            const isUnregistered = data.includes('UNREGISTERED') || data.includes('NOT_FOUND') || data.includes('THIRD_PARTY_AUTH_ERROR');
             console.error('[PUSH] FCM error:', res.statusCode, data);
             resolve({ sent: false, unregistered: isUnregistered });
           }
