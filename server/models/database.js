@@ -292,6 +292,16 @@ function initialize() {
     }
   } catch (e) { /* column may already exist */ }
 
+  // Migration: add is_provider flag to brix_users for provider push notifications
+  try {
+    const usersInfo3 = conn.prepare(`SELECT sql FROM sqlite_master WHERE name = 'brix_users'`).get();
+    if (usersInfo3 && usersInfo3.sql && !usersInfo3.sql.includes('is_provider')) {
+      console.log('[DB] Migrating brix_users: adding is_provider column...');
+      conn.exec(`ALTER TABLE brix_users ADD COLUMN is_provider INTEGER DEFAULT 0`);
+      console.log('[DB] Migration complete: is_provider added');
+    }
+  } catch (e) { /* column may already exist */ }
+
   console.log('BRIX database initialized');
 }
 

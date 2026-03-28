@@ -1003,4 +1003,90 @@ router.post('/claim-web-accounts', (req, res) => {
   res.json({ linked, count: linked.length });
 });
 
+/**
+ * POST /brix/set-provider-status
+ * Body: { is_provider: true/false }
+ * Requires NIP-98 auth.
+ * Marks user as active provider to receive new order push notifications.
+ */
+router.post('/set-provider-status', (req, res) => {
+  const pubkey = req.verifiedPubkey || req.headers['x-nostr-pubkey'];
+  if (!pubkey) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+
+  const { is_provider } = req.body;
+  if (typeof is_provider !== 'boolean') {
+    return res.status(400).json({ error: 'is_provider (boolean) required' });
+  }
+
+  const db = getDb();
+  const result = db.prepare(
+    "UPDATE brix_users SET is_provider = ?, updated_at = datetime('now') WHERE nostr_pubkey = ? AND verified = 1"
+  ).run(is_provider ? 1 : 0, pubkey);
+
+  if (result.changes === 0) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  console.log(`[PROVIDER] ${pubkey.substring(0, 8)}... set is_provider=${is_provider}`);
+  res.json({ success: true, is_provider });
+});
+
+/**
+ * POST /brix/notify-providers
+ * Body: { bill_type }
+ * Requires NIP-98 auth.
+ * Sends FCM data-only push to all active providers (except sender).
+ * Minimal data: only type + bill_type. No order details leak.
+ */
+router.post('/notify-providers', async (req, res) => {
+  const senderPubkey = req.verifiedPubkey || req.headers['x-nostr-pubkey'];
+  if (!senderPubkey) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+
+  const { bill_type } = req.body;
+  if (!bill_type || typeof bill_type !== 'string') {
+    return res.status(400).json({ error: 'bill_type required' });
+  }
+
+  const db = getDb();
+  // Get all active providers with FCM tokens, EXCLUDING the sender
+  const providers = db.prepare(
+    "SELECT DISTINCT fcm_token FROM brix_users WHERE is_provider = 1 AND fcm_token IS NOT NULL AND nostr_pubkey != ? AND verified = 1"
+  ).all(senderPubkey);
+
+  if (providers.length === 0) {
+    return res.json({ success: true, notified: 0 });
+  }
+
+  const { sendPush } = require('../services/push');
+  let sent = 0;
+  let stale = 0;
+
+  // Send in parallel (fire-and-forget style, but track results)
+  const results = await Promise.allSettled(
+    providers.map(p => sendPush(p.fcm_token, {
+      type: 'new_order',
+      bill_type: bill_type.substring(0, 50),
+    }))
+  );
+
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    if (r.status === 'fulfilled') {
+      if (r.value.sent) sent++;
+      if (r.value.unregistered) {
+        stale++;
+        // Clear stale token
+        db.prepare("UPDATE brix_users SET fcm_token = NULL WHERE fcm_token = ?").run(providers[i].fcm_token);
+      }
+    }
+  }
+
+  console.log(`[PROVIDER] New order push: ${sent}/${providers.length} sent, ${stale} stale tokens cleared (bill_type=${bill_type})`);
+  res.json({ success: true, notified: sent, total_providers: providers.length });
+});
+
 module.exports = router;
