@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
+const rateLimit = require('express-rate-limit');
 const { getDb } = require('../models/database');
 const { sendVerificationCode } = require('../services/email');
 const { sendSmsVerification, checkSmsVerification, normalizeBrazilianPhone } = require('../services/sms');
@@ -502,7 +503,10 @@ router.post('/claim', async (req, res) => {
  */
 router.post('/link-pubkey', (req, res) => {
   const { username, nostr_pubkey } = req.body;
-  const currentPubkey = req.verifiedPubkey || req.headers['x-nostr-pubkey'];
+  if (!req.verifiedPubkey) {
+    return res.status(401).json({ error: 'NIP-98 authentication required' });
+  }
+  const currentPubkey = req.verifiedPubkey;
 
   if (!username || !nostr_pubkey) {
     return res.status(400).json({ error: 'username e nostr_pubkey obrigatórios' });
@@ -590,6 +594,11 @@ router.get('/find-by-email/:email', (req, res) => {
     return res.status(404).json({ error: 'Nenhum BRIX encontrado' });
   }
 
+  // Only allow finding your own accounts or unclaimed web accounts
+  if (user.nostr_pubkey !== authedPubkey && !user.nostr_pubkey.startsWith('web_')) {
+    return res.status(404).json({ error: 'Nenhum BRIX encontrado' });
+  }
+
   const domain = process.env.BRIX_DOMAIN || 'brix.app';
   res.json({
     brix_address: `${user.username}@${domain}`,
@@ -603,10 +612,10 @@ router.get('/find-by-email/:email', (req, res) => {
  */
 router.get('/history/:pubkey', (req, res) => {
   const { pubkey } = req.params;
-  const authedPubkey = req.verifiedPubkey || req.headers['x-nostr-pubkey'];
-  if (!authedPubkey || authedPubkey !== pubkey) {
+  if (!req.verifiedPubkey || req.verifiedPubkey !== pubkey) {
     return res.status(403).json({ error: 'Não autorizado' });
   }
+  const authedPubkey = req.verifiedPubkey;
   const db = getDb();
   const user = db.prepare('SELECT id FROM brix_users WHERE nostr_pubkey = ? AND verified = 1').get(pubkey);
   if (!user) {
@@ -700,7 +709,10 @@ router.get('/resolve/:query', (req, res) => {
  */
 router.post('/submit-invoice', (req, res) => {
   const { request_id, invoice } = req.body;
-  const nostr_pubkey = req.verifiedPubkey || req.headers['x-nostr-pubkey'];
+  if (!req.verifiedPubkey) {
+    return res.status(401).json({ error: 'NIP-98 authentication required' });
+  }
+  const nostr_pubkey = req.verifiedPubkey;
 
   if (!request_id || !invoice || !nostr_pubkey) {
     return res.status(400).json({ error: 'Campos obrigatórios: request_id, invoice' });
@@ -739,10 +751,10 @@ router.post('/submit-invoice', (req, res) => {
 router.get('/invoice-requests/:pubkey', (req, res) => {
   const { pubkey } = req.params;
   const username = req.query.username; // Optional: filter to specific BRIX account
-  const authedPubkey = req.verifiedPubkey || req.headers['x-nostr-pubkey'];
-  if (!authedPubkey || authedPubkey !== pubkey) {
+  if (!req.verifiedPubkey || req.verifiedPubkey !== pubkey) {
     return res.status(403).json({ error: 'Não autorizado' });
   }
+  const authedPubkey = req.verifiedPubkey;
   const db = getDb();
 
   let users;
@@ -1010,10 +1022,10 @@ router.post('/claim-web-accounts', (req, res) => {
  * Marks user as active provider to receive new order push notifications.
  */
 router.post('/set-provider-status', (req, res) => {
-  const pubkey = req.verifiedPubkey || req.headers['x-nostr-pubkey'];
-  if (!pubkey) {
-    return res.status(401).json({ error: 'Authentication required' });
+  if (!req.verifiedPubkey) {
+    return res.status(401).json({ error: 'NIP-98 authentication required' });
   }
+  const pubkey = req.verifiedPubkey;
 
   const { is_provider } = req.body;
   if (typeof is_provider !== 'boolean') {
@@ -1033,6 +1045,14 @@ router.post('/set-provider-status', (req, res) => {
   res.json({ success: true, is_provider });
 });
 
+// Rate limit for provider notification push (prevents spam)
+const notifyProvidersLimiter = rateLimit({
+  windowMs: 60 * 1000,  // 1 minute
+  max: 5,               // Max 5 notifications per minute per pubkey
+  keyGenerator: (req) => req.verifiedPubkey || req.ip,
+  message: { error: 'Too many notifications. Try again later.' },
+});
+
 /**
  * POST /brix/notify-providers
  * Body: { bill_type }
@@ -1040,11 +1060,11 @@ router.post('/set-provider-status', (req, res) => {
  * Sends FCM data-only push to all active providers (except sender).
  * Minimal data: only type + bill_type. No order details leak.
  */
-router.post('/notify-providers', async (req, res) => {
-  const senderPubkey = req.verifiedPubkey || req.headers['x-nostr-pubkey'];
-  if (!senderPubkey) {
-    return res.status(401).json({ error: 'Authentication required' });
+router.post('/notify-providers', notifyProvidersLimiter, async (req, res) => {
+  if (!req.verifiedPubkey) {
+    return res.status(401).json({ error: 'NIP-98 authentication required' });
   }
+  const senderPubkey = req.verifiedPubkey;
 
   const { bill_type } = req.body;
   if (!bill_type || typeof bill_type !== 'string') {
