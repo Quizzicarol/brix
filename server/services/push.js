@@ -112,10 +112,15 @@ async function sendPush(fcmToken, data, notification = null) {
         apns: {
           headers: {
             'apns-priority': '10',
+            // iOS 13+ requires explicit push type; without it iOS may
+            // classify as 'background' and never show an alert.
+            ...(notification ? { 'apns-push-type': 'alert' } : { 'apns-push-type': 'background' }),
           },
           payload: {
             aps: {
               'content-available': 1,
+              ...(notification ? { 'sound': 'default' } : {}),
+              ...(notification ? { 'mutable-content': 1 } : {}),
             },
           },
         },
