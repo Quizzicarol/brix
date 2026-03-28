@@ -455,7 +455,12 @@ router.post('/claim', async (req, res) => {
 
   // Validate invoice amount matches expected amount
   const invoiceAmountSats = decodeBolt11AmountSats(invoice);
-  if (invoiceAmountSats != null && invoiceAmountSats !== amountToPay) {
+  if (invoiceAmountSats == null) {
+    db.prepare("UPDATE brix_pending_payments SET status = 'received' WHERE id = ?").run(payment_id);
+    console.warn(`[BRIX] ✗ Claim rejected: 0-amount or unreadable invoice`);
+    return res.status(400).json({ error: 'Invoice deve ter valor definido' });
+  }
+  if (invoiceAmountSats !== amountToPay) {
     db.prepare("UPDATE brix_pending_payments SET status = 'received' WHERE id = ?").run(payment_id);
     console.warn(`[BRIX] ✗ Claim rejected: invoice amount ${invoiceAmountSats} != expected ${amountToPay} sats`);
     return res.status(400).json({ error: 'Valor da invoice não corresponde ao pagamento' });
@@ -497,7 +502,7 @@ router.post('/claim', async (req, res) => {
  */
 router.post('/link-pubkey', (req, res) => {
   const { username, nostr_pubkey } = req.body;
-  const currentPubkey = req.headers['x-nostr-pubkey'];
+  const currentPubkey = req.verifiedPubkey || req.headers['x-nostr-pubkey'];
 
   if (!username || !nostr_pubkey) {
     return res.status(400).json({ error: 'username e nostr_pubkey obrigatórios' });
@@ -598,7 +603,7 @@ router.get('/find-by-email/:email', (req, res) => {
  */
 router.get('/history/:pubkey', (req, res) => {
   const { pubkey } = req.params;
-  const authedPubkey = req.headers['x-nostr-pubkey'];
+  const authedPubkey = req.verifiedPubkey || req.headers['x-nostr-pubkey'];
   if (!authedPubkey || authedPubkey !== pubkey) {
     return res.status(403).json({ error: 'Não autorizado' });
   }
@@ -695,7 +700,7 @@ router.get('/resolve/:query', (req, res) => {
  */
 router.post('/submit-invoice', (req, res) => {
   const { request_id, invoice } = req.body;
-  const nostr_pubkey = req.headers['x-nostr-pubkey'];
+  const nostr_pubkey = req.verifiedPubkey || req.headers['x-nostr-pubkey'];
 
   if (!request_id || !invoice || !nostr_pubkey) {
     return res.status(400).json({ error: 'Campos obrigatórios: request_id, invoice' });
@@ -734,7 +739,7 @@ router.post('/submit-invoice', (req, res) => {
 router.get('/invoice-requests/:pubkey', (req, res) => {
   const { pubkey } = req.params;
   const username = req.query.username; // Optional: filter to specific BRIX account
-  const authedPubkey = req.headers['x-nostr-pubkey'];
+  const authedPubkey = req.verifiedPubkey || req.headers['x-nostr-pubkey'];
   if (!authedPubkey || authedPubkey !== pubkey) {
     return res.status(403).json({ error: 'Não autorizado' });
   }
