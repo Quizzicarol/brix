@@ -188,9 +188,9 @@ router.get('/:identifier/callback', async (req, res) => {
         const pendingId = crypto.randomUUID();
         db.prepare(`
           INSERT INTO brix_pending_payments
-            (id, user_id, amount_sats, payment_hash, status, sender_note, server_payment_hash)
-          VALUES (?, ?, ?, ?, 'pending_payment', ?, ?)
-        `).run(pendingId, user.id, amountSats, paymentHash, sanitizedComment, paymentHash);
+            (id, user_id, amount_sats, payment_hash, status, sender_note, server_payment_hash, server_invoice)
+          VALUES (?, ?, ?, ?, 'pending_payment', ?, ?, ?)
+        `).run(pendingId, user.id, amountSats, paymentHash, sanitizedComment, paymentHash, bolt11);
 
         console.log(`[LNURL] ✓ Offline invoice created for ${lnAddress}: ${amountSats} sats (pending_id=${pendingId.substring(0, 8)})`);
 

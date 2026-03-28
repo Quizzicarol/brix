@@ -5,6 +5,7 @@ const { getDb } = require('../models/database');
 const { sendVerificationCode } = require('../services/email');
 const { sendSmsVerification, checkSmsVerification, normalizeBrazilianPhone } = require('../services/sms');
 const { encrypt, decrypt, hmacHash } = require('../services/encryption');
+const wallet = require('../services/wallet');
 
 // debug-user endpoint REMOVED for security (information disclosure)
 
@@ -418,13 +419,19 @@ router.post('/claim', async (req, res) => {
     db.prepare("UPDATE brix_pending_payments SET status = 'claiming' WHERE id = ?").run(payment_id);
 
     const amountToPay = payment.net_amount_sats || payment.amount_sats;
-    const forwardHash = crypto.randomBytes(32).toString('hex');
+
+    // Actually pay the recipient's invoice from server Spark wallet
+    console.log(`[BRIX] Claiming ${amountToPay} sats for user ${user.id.substring(0, 8)} — paying invoice...`);
+    const result = await wallet.payInvoice(invoice);
+    const forwardHash = result.paymentHash;
 
     db.prepare(`
       UPDATE brix_pending_payments
       SET status = 'forwarded', forwarded_at = datetime('now'), forward_hash = ?
       WHERE id = ?
     `).run(forwardHash, payment_id);
+
+    console.log(`[BRIX] ✓ Claim complete: ${amountToPay} sats forwarded (hash=${forwardHash.substring(0, 16)})`);
 
     res.json({
       success: true,
