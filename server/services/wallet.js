@@ -44,7 +44,9 @@ let walletConfig = null;
 function getWalletConfig() {
   if (walletConfig !== null) return walletConfig;
 
-  if (!FEE_ENABLED) {
+  // Spark provider works independently of fee settings (used for offline fallback)
+  // LNbits/mock require FEE_ENABLED
+  if (!FEE_ENABLED && WALLET_PROVIDER !== 'spark') {
     walletConfig = false;
     return false;
   }
