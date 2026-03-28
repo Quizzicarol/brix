@@ -176,7 +176,7 @@ function start() {
     return;
   }
   running = true;
-  console.log('[FEE] Atomic payment forwarder started (HODL mode)');
+  console.log(`[FEE] Atomic payment forwarder started (${wallet.isHodlMode() ? 'HODL' : 'regular'} mode)`);
 
   const loop = async () => {
     if (!running) return;
