@@ -3,6 +3,7 @@ const router = express.Router();
 const crypto = require('crypto');
 const { getDb } = require('../models/database');
 const { sendWakeUpPush } = require('../services/push');
+const wallet = require('../services/wallet');
 
 const DOMAIN = process.env.BRIX_DOMAIN || 'localhost:3100';
 const PROTOCOL = process.env.NODE_ENV === 'production' ? 'https' : 'http';
@@ -56,11 +57,9 @@ router.get('/:identifier', (req, res) => {
  *
  * Flow:
  * 1. Try to get a Spark invoice from the recipient's app (polling + FCM push)
- * 2. Sender pays the Spark invoice → money goes to recipient's Spark channel
- * 3. Recipient sees payment when they open the app (Spark is cloud-hosted)
- *
- * IMPORTANT: The invoice MUST always be a Spark invoice from the recipient's device.
- * Do NOT use LNbits or any server wallet as fallback.
+ * 2. If app responds: sender pays Spark invoice → direct to recipient
+ * 3. If app is offline: server wallet creates invoice → stores pending payment
+ *    → recipient claims when they open the app
  */
 router.get('/:identifier/callback', async (req, res) => {
   const { identifier } = req.params;
@@ -173,14 +172,50 @@ router.get('/:identifier/callback', async (req, res) => {
       });
     }
 
-    // ── App didn't respond — payment cannot proceed ──
+    // ── App didn't respond — use server wallet as offline fallback ──
     db.prepare(`UPDATE brix_invoice_requests SET status = 'expired' WHERE id = ?`).run(requestId);
-    console.log(`[LNURL] ✗ App offline for ${lnAddress} — no Spark invoice generated. Payment cannot proceed.`);
 
-    return res.json({
-      status: 'ERROR',
-      reason: 'Destinatário offline. Tente novamente em alguns minutos.',
-    });
+    if (wallet.isEnabled()) {
+      console.log(`[LNURL] App offline for ${lnAddress} — using server wallet fallback for ${amountSats} sats`);
+
+      try {
+        const memo = sanitizedComment
+          ? `BRIX: ${sanitizedComment}`
+          : `BRIX Payment to ${lnAddress}`;
+        const { bolt11, paymentHash } = await wallet.createInvoice(amountSats, memo);
+
+        // Store as pending payment — will be forwarded when recipient comes online
+        const pendingId = crypto.randomUUID();
+        db.prepare(`
+          INSERT INTO brix_pending_payments
+            (id, user_id, amount_sats, payment_hash, status, sender_note, server_payment_hash)
+          VALUES (?, ?, ?, ?, 'pending_payment', ?, ?)
+        `).run(pendingId, user.id, amountSats, paymentHash, sanitizedComment, paymentHash);
+
+        console.log(`[LNURL] ✓ Offline invoice created for ${lnAddress}: ${amountSats} sats (pending_id=${pendingId.substring(0, 8)})`);
+
+        return res.json({
+          pr: bolt11,
+          routes: [],
+          successAction: {
+            tag: 'message',
+            message: `Pagamento de ${amountSats} sats será entregue a ${lnAddress} quando abrir o app.`,
+          },
+        });
+      } catch (walletErr) {
+        console.error(`[LNURL] Server wallet fallback failed: ${walletErr.message}`);
+        return res.json({
+          status: 'ERROR',
+          reason: 'Destinatário offline e fallback indisponível. Tente novamente.',
+        });
+      }
+    } else {
+      console.log(`[LNURL] ✗ App offline for ${lnAddress} — no Spark invoice generated. Server wallet disabled.`);
+      return res.json({
+        status: 'ERROR',
+        reason: 'Destinatário offline. Tente novamente em alguns minutos.',
+      });
+    }
   } catch (err) {
     console.error('Error in LNURL callback:', err);
     res.status(500).json({
