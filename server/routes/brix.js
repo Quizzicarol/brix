@@ -720,14 +720,14 @@ router.get('/invoice-requests/:pubkey', (req, res) => {
     // Per-username filtering already prevents self-invoicing (user_id scoped to this username)
     // No sender_pubkey filter needed — allows same-pubkey users to receive from each other
     requests = db.prepare(`
-      SELECT id, amount_sats, created_at FROM brix_invoice_requests
+      SELECT id, amount_sats, comment, created_at FROM brix_invoice_requests
       WHERE user_id IN (${placeholders}) AND status = 'pending' AND created_at > datetime('now', '-2 minutes')
       ORDER BY created_at DESC
     `).all(...userIds);
   } else {
     // Legacy clients without username: use sender_pubkey filter to prevent self-invoicing
     requests = db.prepare(`
-      SELECT id, amount_sats, created_at FROM brix_invoice_requests
+      SELECT id, amount_sats, comment, created_at FROM brix_invoice_requests
       WHERE user_id IN (${placeholders}) AND status = 'pending' AND created_at > datetime('now', '-2 minutes')
       AND (sender_pubkey IS NULL OR sender_pubkey != ?)
       ORDER BY created_at DESC

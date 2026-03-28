@@ -105,9 +105,9 @@ router.get('/:identifier/callback', async (req, res) => {
     const senderPubkey = (sender && /^[0-9a-f]{64}$/.test(sender)) ? sender : null;
     const requestId = crypto.randomUUID();
     db.prepare(`
-      INSERT INTO brix_invoice_requests (id, user_id, amount_sats, status, sender_pubkey)
-      VALUES (?, ?, ?, 'pending', ?)
-    `).run(requestId, user.id, amountSats, senderPubkey);
+      INSERT INTO brix_invoice_requests (id, user_id, amount_sats, status, sender_pubkey, comment)
+      VALUES (?, ?, ?, 'pending', ?, ?)
+    `).run(requestId, user.id, amountSats, senderPubkey, sanitizedComment);
 
     // Check if user's app is reachable (has FCM token or was recently seen polling)
     // Also check sibling users with same pubkey (multiple usernames, same device)
