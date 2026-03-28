@@ -1,24 +1,30 @@
 /**
- * BRIX Server Wallet — provides Lightning invoice/payment for fee collection.
+ * BRIX Server Wallet — provides Lightning invoice/payment via Spark SDK.
+ *
+ * The server runs its OWN Spark wallet to:
+ *   1. Receive payments on behalf of offline users (create invoice → receive sats)
+ *   2. Forward sats to users when they come online (pay their Spark invoice)
  *
  * Two modes:
- *   REGULAR (default, works with any LNbits):
- *     1. Server creates regular invoice for GROSS amount
- *     2. Sender pays → money in server wallet
- *     3. Server pays recipient NET amount, keeps fee
+ *   REGULAR (default):
+ *     1. Server creates invoice for amount
+ *     2. Sender pays → money in server Spark wallet
+ *     3. Server pays recipient when online, keeps fee
  *
- *   HODL (requires LND backend):
- *     1. Server creates HODL invoice for GROSS amount (locked, not settled)
- *     2. Server pays recipient invoice for NET amount
- *     3. On success → settle HODL invoice → server keeps fee
- *     4. On failure → cancel HODL invoice → sender refunded automatically
+ *   HODL (not supported with Spark — use regular):
+ *     Reserved for future use
  *
  * Environment variables:
- *   BRIX_FEE_ENABLED=true         — enable fee collection
- *   WALLET_PROVIDER=lnbits|mock
- *   WALLET_MODE=regular|hodl      — invoice mode (default: regular)
+ *   BRIX_FEE_ENABLED=true                — enable wallet
+ *   WALLET_PROVIDER=spark|lnbits|mock
+ *   WALLET_MODE=regular                  — only regular supported with Spark
  *
- *   For LNbits:
+ *   For Spark:
+ *     SPARK_MNEMONIC=<12/24 word mnemonic for server wallet>
+ *     BREEZ_API_KEY=<breez sdk api key>
+ *     SPARK_NETWORK=mainnet|regtest       — default: mainnet
+ *
+ *   For LNbits (legacy):
  *     WALLET_URL=https://your-lnbits.com
  *     LNBITS_INVOICE_KEY=<invoice/read key>
  *     LNBITS_ADMIN_KEY=<admin key>
@@ -44,6 +50,21 @@ function getWalletConfig() {
   }
 
   switch (WALLET_PROVIDER) {
+    case 'spark': {
+      const mnemonic = process.env.SPARK_MNEMONIC;
+      const apiKey = process.env.BREEZ_API_KEY;
+      const network = process.env.SPARK_NETWORK || 'mainnet';
+
+      if (!mnemonic || !apiKey) {
+        console.warn('[WALLET] Spark config incomplete (need SPARK_MNEMONIC + BREEZ_API_KEY) — wallet disabled');
+        walletConfig = false;
+        return false;
+      }
+
+      walletConfig = { provider: 'spark', mnemonic, apiKey, network };
+      break;
+    }
+
     case 'lnbits': {
       const walletUrl = process.env.WALLET_URL;
       const invoiceKey = process.env.LNBITS_INVOICE_KEY;
@@ -129,6 +150,106 @@ function generatePreimage() {
     paymentHash: paymentHash.toString('hex'),
   };
 }
+
+// ─── Spark provider (Breez SDK) ───
+
+let sparkSdk = null;
+let sparkInitializing = false;
+
+async function getSparkSdk() {
+  if (sparkSdk) return sparkSdk;
+  if (sparkInitializing) {
+    // Wait for ongoing init
+    for (let i = 0; i < 60; i++) {
+      await new Promise(r => setTimeout(r, 500));
+      if (sparkSdk) return sparkSdk;
+    }
+    throw new Error('Spark SDK init timeout');
+  }
+
+  sparkInitializing = true;
+  try {
+    const { defaultConfig, SdkBuilder } = require('@breeztech/breez-sdk-spark/nodejs');
+    const config = getWalletConfig();
+    if (!config || config.provider !== 'spark') throw new Error('Spark not configured');
+
+    const sdkConfig = defaultConfig(config.network);
+    sdkConfig.apiKey = config.apiKey;
+
+    let builder = SdkBuilder.new(sdkConfig, {
+      type: 'mnemonic',
+      mnemonic: config.mnemonic,
+    });
+    builder = await builder.withDefaultStorage('/data/spark_server_wallet');
+
+    sparkSdk = await builder.build();
+    console.log('[WALLET:spark] SDK initialized successfully');
+
+    // Log balance
+    try {
+      const info = await sparkSdk.getInfo({});
+      console.log(`[WALLET:spark] Balance: ${info.balanceSat} sats`);
+    } catch (_) {}
+
+    return sparkSdk;
+  } catch (err) {
+    console.error(`[WALLET:spark] SDK init failed: ${err.message}`);
+    sparkInitializing = false;
+    throw err;
+  }
+}
+
+const spark = {
+  async createInvoice(amountSats, memo) {
+    const sdk = await getSparkSdk();
+    const resp = await sdk.receivePayment({
+      paymentMethod: {
+        type: 'bolt11Invoice',
+        description: memo || 'BRIX Payment',
+        amountSats: BigInt(amountSats),
+      },
+    });
+    // Extract payment hash from bolt11
+    const bolt11 = resp.paymentRequest;
+    // Use a hash of the bolt11 as identifier
+    const paymentHash = crypto.createHash('sha256').update(bolt11).digest('hex');
+    return { bolt11, paymentHash };
+  },
+
+  async checkInvoicePaid(paymentHash) {
+    // For Spark, we track by payment hash stored in DB
+    // The SDK auto-claims received payments
+    // We check balance change or just trust the LNURL flow timeout
+    return false; // Not used in the offline fallback flow
+  },
+
+  async payInvoice(bolt11) {
+    const sdk = await getSparkSdk();
+    const prepareResp = await sdk.prepareSendPayment({
+      paymentRequest: bolt11,
+      amount: null,
+      tokenIdentifier: null,
+      conversionOptions: null,
+      feePolicy: null,
+    });
+    const sendResp = await sdk.sendPayment({
+      prepareResponse: prepareResp,
+      options: {
+        type: 'bolt11Invoice',
+        preferSpark: false,
+        completionTimeoutSecs: 30,
+      },
+      idempotencyKey: null,
+    });
+    return { paymentHash: sendResp.payment?.id || crypto.randomUUID() };
+  },
+
+  // HODL not supported with Spark
+  async createHodlInvoice() { throw new Error('HODL not supported with Spark provider'); },
+  async settleHodlInvoice() { throw new Error('HODL not supported with Spark provider'); },
+  async cancelHodlInvoice() { throw new Error('HODL not supported with Spark provider'); },
+  async checkInvoiceHeld() { return false; },
+};
 
 // ─── LNbits provider (HODL via LND backend) ───
 
@@ -294,7 +415,7 @@ const mock = {
 
 // ─── Unified interface ───
 
-const providers = { lnbits, mock };
+const providers = { spark, lnbits, mock };
 
 function getProvider() {
   const config = getWalletConfig();
@@ -360,14 +481,29 @@ async function checkInvoicePaid(paymentHash) {
 
 async function getWalletBalance() {
   const config = getWalletConfig();
-  if (!config || config.provider !== 'lnbits') return null;
-  const result = await httpRequest(
-    `${config.walletUrl}/api/v1/wallet`,
-    'GET',
-    { 'X-Api-Key': config.invoiceKey },
-    null,
-  );
-  return { balance_msats: result.balance, name: result.name, url: config.walletUrl };
+  if (!config) return null;
+
+  if (config.provider === 'spark') {
+    try {
+      const sdk = await getSparkSdk();
+      const info = await sdk.getInfo({});
+      return { balance_sats: Number(info.balanceSat), provider: 'spark' };
+    } catch (e) {
+      return { balance_sats: 0, provider: 'spark', error: e.message };
+    }
+  }
+
+  if (config.provider === 'lnbits') {
+    const result = await httpRequest(
+      `${config.walletUrl}/api/v1/wallet`,
+      'GET',
+      { 'X-Api-Key': config.invoiceKey },
+      null,
+    );
+    return { balance_msats: result.balance, name: result.name, url: config.walletUrl };
+  }
+
+  return null;
 }
 
 module.exports = {
