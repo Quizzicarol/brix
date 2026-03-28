@@ -65,16 +65,24 @@ function nip98Auth(req, res, next) {
         return next();
       }
 
-      // Verify method tag matches request method
+      // Verify method tag matches request method (required)
       const methodTag = (event.tags || []).find(t => t[0] === 'method');
-      if (methodTag && methodTag[1].toUpperCase() !== req.method.toUpperCase()) {
+      if (!methodTag) {
+        if (isAuthPath) console.log(`[NIP98] FAIL ${req.method} ${req.path}: missing method tag`);
+        return next();
+      }
+      if (methodTag[1].toUpperCase() !== req.method.toUpperCase()) {
         if (isAuthPath) console.log(`[NIP98] FAIL ${req.method} ${req.path}: method mismatch (event=${methodTag[1]}, req=${req.method})`);
         return next();
       }
 
-      // Verify URL path matches (flexible: compare paths only, ignore protocol/host)
+      // Verify URL path matches (required, compare paths only, ignore protocol/host)
       const urlTag = (event.tags || []).find(t => t[0] === 'u');
-      if (urlTag) {
+      if (!urlTag) {
+        if (isAuthPath) console.log(`[NIP98] FAIL ${req.method} ${req.path}: missing URL tag`);
+        return next();
+      }
+      {
         try {
           const eventPath = new URL(urlTag[1]).pathname;
           if (eventPath !== req.path) {
