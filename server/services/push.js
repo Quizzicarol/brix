@@ -84,15 +84,17 @@ async function getAccessToken() {
 }
 
 /**
- * Send an FCM push notification to wake up the app.
- * Supports both notification (visible) and data (silent) payloads.
+ * Send a DATA-ONLY FCM push to wake up the app for background processing.
+ * IMPORTANT: Must be data-only (no 'notification' field) so that the
+ * background handler fires on Android even when app is killed.
+ * If 'notification' field is present, Android shows the notification but
+ * does NOT call onBackgroundMessage → invoice generation never happens.
  *
  * @param {string} fcmToken - The device FCM token
  * @param {object} data - Key-value data payload (strings only)
- * @param {object|null} notification - Optional {title, body} for visible notification
  * @returns {Promise<{sent: boolean, unregistered: boolean}>} result
  */
-async function sendPush(fcmToken, data, notification = null) {
+async function sendPush(fcmToken, data) {
   if (!PROJECT_ID) {
     console.log('[PUSH] FCM_PROJECT_ID not configured, skipping push');
     return { sent: false, unregistered: false };
@@ -105,22 +107,17 @@ async function sendPush(fcmToken, data, notification = null) {
       message: {
         token: fcmToken,
         data: data,
-        ...(notification ? { notification: { title: notification.title, body: notification.body } } : {}),
         android: {
           priority: 'high',
         },
         apns: {
           headers: {
             'apns-priority': '10',
-            // iOS 13+ requires explicit push type; without it iOS may
-            // classify as 'background' and never show an alert.
-            ...(notification ? { 'apns-push-type': 'alert' } : { 'apns-push-type': 'background' }),
+            'apns-push-type': 'background',
           },
           payload: {
             aps: {
               'content-available': 1,
-              ...(notification ? { 'sound': 'default' } : {}),
-              ...(notification ? { 'mutable-content': 1 } : {}),
             },
           },
         },
@@ -191,9 +188,6 @@ async function sendWakeUpPush(userId, requestId, amountSats) {
     type: 'brix_invoice_request',
     request_id: requestId,
     amount_sats: String(amountSats),
-  }, {
-    title: 'Pagamento BRIX',
-    body: `Recebendo ${amountSats} sats...`,
   });
 
   // Clear stale tokens so we don't keep trying dead FCM tokens
