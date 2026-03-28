@@ -1,0 +1,1 @@
+﻿var d=require('better-sqlite3')('/data/brix.db');var r=d.prepare('SELECT substr(id,1,8) as s,amount_sats as a,status,server_invoice IS NOT NULL as inv,created_at FROM brix_pending_payments ORDER BY created_at DESC LIMIT 15').all();r.forEach(function(p){console.log(p.s,p.a,p.status,p.inv,p.created_at)})

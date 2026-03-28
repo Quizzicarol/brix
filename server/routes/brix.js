@@ -355,6 +355,7 @@ router.post('/resend', async (req, res) => {
  * Requires NIP-98 authentication
  */
 router.get('/pending-payments', (req, res) => {
+  console.log(`[BRIX] GET /pending-payments verifiedPubkey=${req.verifiedPubkey ? req.verifiedPubkey.substring(0,8)+'...' : 'NULL'} x-nostr-pubkey=${(req.headers['x-nostr-pubkey'] || 'none').substring(0,8)}`);
   if (!req.verifiedPubkey) {
     return res.status(401).json({ error: 'NIP-98 authentication required' });
   }

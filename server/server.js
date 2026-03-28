@@ -133,9 +133,11 @@ app.get('/debug/brix-status', (req, res) => {
       ORDER BY ir.created_at DESC LIMIT 20
     `).all();
     const recentPayments = conn.prepare(`
-      SELECT id, user_id, amount_sats, status, created_at
-      FROM brix_pending_payments
-      ORDER BY created_at DESC LIMIT 20
+      SELECT pp.id, pp.amount_sats, pp.status, pp.server_invoice IS NOT NULL as has_invoice, pp.created_at,
+             u.username
+      FROM brix_pending_payments pp
+      LEFT JOIN brix_users u ON u.id = pp.user_id
+      ORDER BY pp.created_at DESC LIMIT 20
     `).all();
     res.json({ users, recentRequests, recentPayments });
   } catch (e) {
