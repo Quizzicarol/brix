@@ -184,6 +184,10 @@ app.listen(PORT, HOST, () => {
   // Log wallet status
   const wallet = require('./services/wallet');
   console.log(`[WALLET] enabled=${wallet.isEnabled()} provider=${process.env.WALLET_PROVIDER || 'none'} mode=${wallet.getMode()}`);
+
+  // Start payment forwarder (polls for paid invoices and forwards to recipients)
+  const paymentForward = require('./services/payment-forward');
+  paymentForward.start();
 });
 
 // Cleanup expired invoice requests daily (prevent DB bloat from DDoS/spam)
