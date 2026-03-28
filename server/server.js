@@ -180,6 +180,10 @@ app.listen(PORT, HOST, () => {
   console.log(`Web UI: http://localhost:${PORT}`);
   console.log(`API:    http://localhost:${PORT}/brix`);
   console.log(`LNURL:  http://localhost:${PORT}/.well-known/lnurlp/<identifier>`);
+
+  // Log wallet status
+  const wallet = require('./services/wallet');
+  console.log(`[WALLET] enabled=${wallet.isEnabled()} provider=${process.env.WALLET_PROVIDER || 'none'} mode=${wallet.getMode()}`);
 });
 
 // Cleanup expired invoice requests daily (prevent DB bloat from DDoS/spam)
