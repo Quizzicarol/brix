@@ -84,14 +84,15 @@ async function getAccessToken() {
 }
 
 /**
- * Send a data-only FCM push notification to wake up the app.
- * Data messages are handled by the app even when in background.
+ * Send an FCM push notification to wake up the app.
+ * Supports both notification (visible) and data (silent) payloads.
  *
  * @param {string} fcmToken - The device FCM token
  * @param {object} data - Key-value data payload (strings only)
+ * @param {object|null} notification - Optional {title, body} for visible notification
  * @returns {Promise<{sent: boolean, unregistered: boolean}>} result
  */
-async function sendPush(fcmToken, data) {
+async function sendPush(fcmToken, data, notification = null) {
   if (!PROJECT_ID) {
     console.log('[PUSH] FCM_PROJECT_ID not configured, skipping push');
     return { sent: false, unregistered: false };
@@ -104,6 +105,7 @@ async function sendPush(fcmToken, data) {
       message: {
         token: fcmToken,
         data: data,
+        ...(notification ? { notification: { title: notification.title, body: notification.body } } : {}),
         android: {
           priority: 'high',
         },
@@ -184,6 +186,9 @@ async function sendWakeUpPush(userId, requestId, amountSats) {
     type: 'brix_invoice_request',
     request_id: requestId,
     amount_sats: String(amountSats),
+  }, {
+    title: 'Pagamento BRIX',
+    body: `Recebendo ${amountSats} sats...`,
   });
 
   // Clear stale tokens so we don't keep trying dead FCM tokens
