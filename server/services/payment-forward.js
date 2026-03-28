@@ -149,7 +149,7 @@ async function tick() {
 
   for (const pp of offlinePending) {
     try {
-      const paid = await wallet.checkInvoicePaid(pp.server_payment_hash);
+      const paid = await wallet.checkInvoicePaid(pp.server_payment_hash, pp.server_invoice);
       if (paid) {
         db.prepare(`UPDATE brix_pending_payments SET status = 'received' WHERE id = ?`).run(pp.id);
         console.log(`[FEE] Offline payment confirmed: ${pp.amount_sats} sats (${pp.id.substring(0, 8)})`);

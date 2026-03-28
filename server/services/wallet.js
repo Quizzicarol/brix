@@ -218,11 +218,24 @@ const spark = {
     return { bolt11, paymentHash };
   },
 
-  async checkInvoicePaid(paymentHash) {
-    // For Spark, we track by payment hash stored in DB
-    // The SDK auto-claims received payments
-    // We check balance change or just trust the LNURL flow timeout
-    return false; // Not used in the offline fallback flow
+  async checkInvoicePaid(paymentHash, bolt11) {
+    if (!bolt11) return false;
+    try {
+      const sdk = await getSparkSdk();
+      const resp = await sdk.listPayments({
+        typeFilter: ['receive'],
+        statusFilter: ['completed'],
+        paymentDetailsFilter: [{ type: 'lightning' }],
+        limit: 50,
+        sortAscending: false,
+      });
+      return resp.payments.some(p =>
+        p.details?.type === 'lightning' && p.details.invoice === bolt11
+      );
+    } catch (err) {
+      console.error(`[WALLET:spark] checkInvoicePaid error: ${err.message}`);
+      return false;
+    }
   },
 
   async payInvoice(bolt11) {
@@ -344,7 +357,7 @@ const lnbits = {
   /**
    * Check if a regular invoice has been paid (money in wallet).
    */
-  async checkInvoicePaid(paymentHash) {
+  async checkInvoicePaid(paymentHash, bolt11) {
     const config = getWalletConfig();
     const result = await httpRequest(
       `${config.walletUrl}/api/v1/payments/${encodeURIComponent(paymentHash)}`,
@@ -409,7 +422,7 @@ const mock = {
     return { bolt11, paymentHash };
   },
 
-  async checkInvoicePaid(paymentHash) {
+  async checkInvoicePaid(paymentHash, bolt11) {
     const p = mockPayments.get(paymentHash);
     return p ? p.status === 'paid' : false;
   },
@@ -475,10 +488,10 @@ async function createInvoice(amountSats, memo) {
   return provider.createInvoice(amountSats, memo);
 }
 
-async function checkInvoicePaid(paymentHash) {
+async function checkInvoicePaid(paymentHash, bolt11) {
   const provider = getProvider();
   if (!provider) throw new Error('Wallet not configured');
-  return provider.checkInvoicePaid(paymentHash);
+  return provider.checkInvoicePaid(paymentHash, bolt11);
 }
 
 async function getWalletBalance() {
