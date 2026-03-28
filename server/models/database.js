@@ -44,7 +44,7 @@ function initialize() {
       user_id         TEXT REFERENCES brix_users(id),
       amount_sats     INTEGER NOT NULL,
       payment_hash    TEXT NOT NULL,
-      status          TEXT DEFAULT 'received' CHECK(status IN ('pending_payment', 'received', 'claiming', 'forwarding', 'forwarded', 'expired')),
+      status          TEXT DEFAULT 'received' CHECK(status IN ('pending_payment', 'received', 'claiming', 'claim_failed', 'forwarding', 'forwarded', 'expired')),
       sender_note     TEXT,
       server_invoice  TEXT,
       server_payment_hash TEXT,
@@ -118,7 +118,7 @@ function initialize() {
           user_id         TEXT REFERENCES brix_users(id),
           amount_sats     INTEGER NOT NULL,
           payment_hash    TEXT NOT NULL,
-          status          TEXT DEFAULT 'received' CHECK(status IN ('pending_payment', 'received', 'claiming', 'forwarding', 'forwarded', 'expired')),
+          status          TEXT DEFAULT 'received' CHECK(status IN ('pending_payment', 'received', 'claiming', 'claim_failed', 'forwarding', 'forwarded', 'expired')),
           sender_note     TEXT,
           server_invoice  TEXT,
           server_payment_hash TEXT,
@@ -143,6 +143,43 @@ function initialize() {
     }
   } catch (migrationErr) {
     // Table might not exist yet (fresh install)
+  }
+
+  // Migration: add 'claim_failed' status to brix_pending_payments
+  try {
+    const ppInfo2 = conn.prepare(`SELECT sql FROM sqlite_master WHERE name = 'brix_pending_payments'`).get();
+    if (ppInfo2 && ppInfo2.sql && !ppInfo2.sql.includes('claim_failed')) {
+      console.log('[DB] Migrating brix_pending_payments: adding claim_failed status...');
+      conn.exec(`
+        ALTER TABLE brix_pending_payments RENAME TO brix_pending_payments_v2;
+
+        CREATE TABLE brix_pending_payments (
+          id              TEXT PRIMARY KEY,
+          user_id         TEXT REFERENCES brix_users(id),
+          amount_sats     INTEGER NOT NULL,
+          payment_hash    TEXT NOT NULL,
+          status          TEXT DEFAULT 'received' CHECK(status IN ('pending_payment', 'received', 'claiming', 'claim_failed', 'forwarding', 'forwarded', 'expired')),
+          sender_note     TEXT,
+          server_invoice  TEXT,
+          server_payment_hash TEXT,
+          fee_sats        INTEGER DEFAULT 0,
+          net_amount_sats INTEGER,
+          created_at      TEXT DEFAULT (datetime('now')),
+          forwarded_at    TEXT,
+          forward_hash    TEXT
+        );
+
+        INSERT INTO brix_pending_payments SELECT * FROM brix_pending_payments_v2;
+        DROP TABLE brix_pending_payments_v2;
+
+        CREATE INDEX IF NOT EXISTS idx_pending_user ON brix_pending_payments(user_id, status);
+        CREATE INDEX IF NOT EXISTS idx_pending_hash ON brix_pending_payments(payment_hash);
+        CREATE INDEX IF NOT EXISTS idx_pending_server_hash ON brix_pending_payments(server_payment_hash);
+      `);
+      console.log('[DB] Migration complete: claim_failed status added');
+    }
+  } catch (migrationErr) {
+    // Table might not exist yet
   }
 
   // Migration: add 'paid' and 'failed' statuses to existing brix_fee_transactions

@@ -352,14 +352,13 @@ router.post('/resend', async (req, res) => {
 
 /**
  * GET /brix/pending-payments
- * Header: x-nostr-pubkey
+ * Requires NIP-98 authentication
  */
 router.get('/pending-payments', (req, res) => {
-  const nostr_pubkey = req.headers['x-nostr-pubkey'];
-
-  if (!nostr_pubkey) {
-    return res.status(401).json({ error: 'Autenticação obrigatória' });
+  if (!req.verifiedPubkey) {
+    return res.status(401).json({ error: 'NIP-98 authentication required' });
   }
+  const nostr_pubkey = req.verifiedPubkey;
 
   const db = getDb();
   const user = db.prepare('SELECT id FROM brix_users WHERE nostr_pubkey = ? AND verified = 1').get(nostr_pubkey);
@@ -388,16 +387,50 @@ router.get('/pending-payments', (req, res) => {
 });
 
 /**
+ * Extract amount in sats from a BOLT11 invoice string.
+ * Returns null if amount cannot be determined.
+ */
+function decodeBolt11AmountSats(bolt11) {
+  if (!bolt11 || typeof bolt11 !== 'string') return null;
+  const lower = bolt11.toLowerCase();
+  // BOLT11 format: ln<network><amount><multiplier>1<data>
+  // networks: bc (mainnet), tb (testnet), bcrt (regtest)
+  const match = lower.match(/^ln(?:bc|tb|bcrt)(\d+)([munp]?)1/);
+  if (!match) return null; // no amount encoded (0-amount invoice)
+  const num = parseInt(match[1], 10);
+  const multiplier = match[2];
+  // Amounts are in BTC by default
+  const btcAmount = {
+    '':  num,           // BTC
+    'm': num * 1e-3,    // milli-BTC
+    'u': num * 1e-6,    // micro-BTC
+    'n': num * 1e-9,    // nano-BTC
+    'p': num * 1e-12,   // pico-BTC
+  }[multiplier];
+  if (btcAmount == null) return null;
+  return Math.round(btcAmount * 1e8); // convert to sats
+}
+
+/**
  * POST /brix/claim
  * Body: { payment_id, invoice }
- * Header: x-nostr-pubkey
+ * Requires NIP-98 authentication
  */
 router.post('/claim', async (req, res) => {
   const { payment_id, invoice } = req.body;
-  const nostr_pubkey = req.headers['x-nostr-pubkey'];
 
-  if (!payment_id || !invoice || !nostr_pubkey) {
+  if (!req.verifiedPubkey) {
+    return res.status(401).json({ error: 'NIP-98 authentication required' });
+  }
+  const nostr_pubkey = req.verifiedPubkey;
+
+  if (!payment_id || !invoice) {
     return res.status(400).json({ error: 'Campos obrigatórios: payment_id, invoice' });
+  }
+
+  // Validate bolt11 format
+  if (typeof invoice !== 'string' || !/^ln(bc|tb|bcrt)/i.test(invoice)) {
+    return res.status(400).json({ error: 'Invoice inválida' });
   }
 
   const db = getDb();
@@ -406,20 +439,28 @@ router.post('/claim', async (req, res) => {
     return res.status(404).json({ error: 'Usuário não encontrado' });
   }
 
-  const payment = db.prepare(`
-    SELECT * FROM brix_pending_payments
-    WHERE id = ? AND user_id = ? AND status = 'received'
-  `).get(payment_id, user.id);
+  // Atomic status transition: only claim if still 'received'
+  const updated = db.prepare(
+    "UPDATE brix_pending_payments SET status = 'claiming' WHERE id = ? AND user_id = ? AND status = 'received'"
+  ).run(payment_id, user.id);
 
-  if (!payment) {
-    return res.status(404).json({ error: 'Pagamento não encontrado ou já resgatado' });
+  if (updated.changes === 0) {
+    return res.status(409).json({ error: 'Pagamento não encontrado ou já sendo resgatado' });
+  }
+
+  // Load payment details after securing the lock
+  const payment = db.prepare('SELECT * FROM brix_pending_payments WHERE id = ?').get(payment_id);
+  const amountToPay = payment.net_amount_sats || payment.amount_sats;
+
+  // Validate invoice amount matches expected amount
+  const invoiceAmountSats = decodeBolt11AmountSats(invoice);
+  if (invoiceAmountSats != null && invoiceAmountSats !== amountToPay) {
+    db.prepare("UPDATE brix_pending_payments SET status = 'received' WHERE id = ?").run(payment_id);
+    console.warn(`[BRIX] ✗ Claim rejected: invoice amount ${invoiceAmountSats} != expected ${amountToPay} sats`);
+    return res.status(400).json({ error: 'Valor da invoice não corresponde ao pagamento' });
   }
 
   try {
-    db.prepare("UPDATE brix_pending_payments SET status = 'claiming' WHERE id = ?").run(payment_id);
-
-    const amountToPay = payment.net_amount_sats || payment.amount_sats;
-
     // Actually pay the recipient's invoice from server Spark wallet
     console.log(`[BRIX] Claiming ${amountToPay} sats for user ${user.id.substring(0, 8)} — paying invoice...`);
     const result = await wallet.payInvoice(invoice);
@@ -439,8 +480,11 @@ router.post('/claim', async (req, res) => {
       forward_hash: forwardHash,
     });
   } catch (err) {
-    db.prepare("UPDATE brix_pending_payments SET status = 'received' WHERE id = ?").run(payment_id);
-    console.error('[BRIX] Erro ao resgatar:', err);
+    // Don't revert to 'received' — payment may have been sent.
+    // Mark as 'claim_failed' for manual review.
+    db.prepare("UPDATE brix_pending_payments SET status = 'claim_failed', forward_hash = ? WHERE id = ?")
+      .run(err.message?.substring(0, 200) || 'unknown', payment_id);
+    console.error(`[BRIX] ✗ Claim failed for ${payment_id.substring(0, 8)}: ${err.message}`);
     res.status(500).json({ error: 'Falha ao resgatar pagamento' });
   }
 });
