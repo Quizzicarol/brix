@@ -245,6 +245,16 @@ function initialize() {
     }
   } catch (e) { /* column may already exist */ }
 
+  // Migration: add comment column to brix_invoice_requests for LNURL-pay comments (LUD-12)
+  try {
+    const irInfo2 = conn.prepare(`SELECT sql FROM sqlite_master WHERE name = 'brix_invoice_requests'`).get();
+    if (irInfo2 && irInfo2.sql && !irInfo2.sql.includes('comment')) {
+      console.log('[DB] Migrating brix_invoice_requests: adding comment column...');
+      conn.exec(`ALTER TABLE brix_invoice_requests ADD COLUMN comment TEXT`);
+      console.log('[DB] Migration complete: comment added');
+    }
+  } catch (e) { /* column may already exist */ }
+
   console.log('BRIX database initialized');
 }
 
