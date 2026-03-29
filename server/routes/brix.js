@@ -69,24 +69,8 @@ router.post('/register', async (req, res) => {
   // Check if username is already taken
   const existingUsername = db.prepare('SELECT id, verified, nostr_pubkey, email, phone FROM brix_users WHERE username = ?').get(cleanUsername);
   if (existingUsername && existingUsername.verified) {
-    // If the existing BRIX was created on the web (web_ pubkey) and the email matches,
-    // allow the app to claim it by updating the pubkey
-    if (existingUsername.nostr_pubkey.startsWith('web_') && cleanEmail && decrypt(existingUsername.email) === cleanEmail) {
-      const domain = process.env.BRIX_DOMAIN || 'brix.app';
-      db.prepare("UPDATE brix_users SET nostr_pubkey = ?, updated_at = datetime('now') WHERE id = ?").run(nostr_pubkey, existingUsername.id);
-      if (cleanPhone) {
-        db.prepare("UPDATE brix_users SET phone = ?, phone_hash = ?, updated_at = datetime('now') WHERE id = ?").run(encrypt(cleanPhone), hmacHash(cleanPhone), existingUsername.id);
-      }
-      console.log(`[BRIX] Web BRIX claimed by app: ${cleanUsername}@${domain} -> ${nostr_pubkey.substring(0, 16)}...`);
-      return res.json({
-        success: true,
-        verified: true,
-        message: 'BRIX vinculado ao app!',
-        user_id: existingUsername.id,
-        username: cleanUsername,
-        brix_address: `${cleanUsername}@${domain}`,
-      });
-    }
+    // Web-created accounts can only be claimed via POST /claim-web-accounts (requires NIP-98 auth + email verification)
+    // NEVER allow claiming here — no email ownership proof at registration time
     return res.status(409).json({ error: 'Este username já está em uso' });
   }
 
@@ -558,6 +542,9 @@ router.post('/link-pubkey', (req, res) => {
  */
 router.get('/address/:pubkey', (req, res) => {
   const { pubkey } = req.params;
+  if (!req.verifiedPubkey || req.verifiedPubkey !== pubkey) {
+    return res.status(403).json({ error: 'Não autorizado' });
+  }
   const db = getDb();
   const users = db.prepare('SELECT username, phone, email FROM brix_users WHERE nostr_pubkey = ? AND verified = 1 ORDER BY created_at ASC').all(pubkey);
 
@@ -642,7 +629,7 @@ router.get('/resolve/:query', (req, res) => {
   const query = req.params.query.trim().toLowerCase();
   const db = getDb();
   const domain = process.env.BRIX_DOMAIN || 'brix.app';
-  const callerPubkey = req.headers['x-nostr-pubkey'] || req.verifiedPubkey || 'anon';
+  const callerPubkey = req.verifiedPubkey || 'anon';
 
   // Try username first
   let user = db.prepare('SELECT username FROM brix_users WHERE username = ? AND verified = 1').get(query);
@@ -1067,8 +1054,9 @@ router.post('/notify-providers', notifyProvidersLimiter, async (req, res) => {
   const senderPubkey = req.verifiedPubkey;
 
   const { bill_type } = req.body;
-  if (!bill_type || typeof bill_type !== 'string') {
-    return res.status(400).json({ error: 'bill_type required' });
+  const allowedBillTypes = ['water', 'electricity', 'internet', 'gas', 'phone', 'tv', 'credit_card', 'boleto', 'other'];
+  if (!bill_type || typeof bill_type !== 'string' || !allowedBillTypes.includes(bill_type)) {
+    return res.status(400).json({ error: 'bill_type inválido' });
   }
 
   const db = getDb();
