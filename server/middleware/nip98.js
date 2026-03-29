@@ -10,7 +10,8 @@ try {
   schnorr = require('@noble/curves/secp256k1').schnorr;
   console.log('[AUTH] NIP-98 signature verification enabled');
 } catch (e) {
-  console.warn('[AUTH] @noble/curves not available — NIP-98 verification disabled');
+  console.error('[AUTH] CRITICAL: @noble/curves not available — NIP-98 verification DISABLED. Server cannot authenticate requests.');
+  process.exit(1);
 }
 
 /**
