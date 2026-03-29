@@ -8,6 +8,28 @@ const { sendSmsVerification, checkSmsVerification, normalizeBrazilianPhone } = r
 const { encrypt, decrypt, hmacHash } = require('../services/encryption');
 const wallet = require('../services/wallet');
 
+// Rate limiters (must be defined before routes that use them)
+const submitInvoiceLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  keyGenerator: (req) => req.verifiedPubkey || req.ip,
+  message: { error: 'Too many invoice submissions. Try again later.' },
+});
+
+const invoiceRequestsLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  keyGenerator: (req) => req.verifiedPubkey || req.ip,
+  message: { error: 'Too many requests. Try again later.' },
+});
+
+const notifyProvidersLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  keyGenerator: (req) => req.verifiedPubkey || req.ip,
+  message: { error: 'Too many notifications. Try again later.' },
+});
+
 // debug-user endpoint REMOVED for security (information disclosure)
 
 /**
@@ -1040,30 +1062,6 @@ router.post('/set-provider-status', (req, res) => {
 
   console.log(`[PROVIDER] ${pubkey.substring(0, 8)}... set is_provider=${is_provider}`);
   res.json({ success: true, is_provider });
-});
-
-// Rate limit for provider notification push (prevents spam)
-const notifyProvidersLimiter = rateLimit({
-  windowMs: 60 * 1000,  // 1 minute
-  max: 5,               // Max 5 notifications per minute per pubkey
-  keyGenerator: (req) => req.verifiedPubkey || req.ip,
-  message: { error: 'Too many notifications. Try again later.' },
-});
-
-// Rate limit for submit-invoice (prevents invoice flooding)
-const submitInvoiceLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 30,              // Max 30 invoice submissions per minute per pubkey
-  keyGenerator: (req) => req.verifiedPubkey || req.ip,
-  message: { error: 'Too many invoice submissions. Try again later.' },
-});
-
-// Rate limit for invoice-requests polling (prevents DB write amplification)
-const invoiceRequestsLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 60,              // Max 60 polls per minute per pubkey (~1/sec)
-  keyGenerator: (req) => req.verifiedPubkey || req.ip,
-  message: { error: 'Too many requests. Try again later.' },
 });
 
 /**
