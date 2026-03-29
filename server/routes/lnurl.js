@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
+const rateLimit = require('express-rate-limit');
 const { getDb } = require('../models/database');
 const { sendWakeUpPush } = require('../services/push');
 const wallet = require('../services/wallet');
@@ -52,6 +53,14 @@ router.get('/:identifier', (req, res) => {
   });
 });
 
+// Rate limit LNURL callback per IP+identifier to prevent DDoS
+const lnurlCallbackLimiter = rateLimit({
+  windowMs: 60 * 1000,  // 1 minute
+  max: 5,               // Max 5 callbacks per IP per identifier per minute
+  keyGenerator: (req) => `${req.ip}:${req.params.identifier}`,
+  message: { status: 'ERROR', reason: 'Rate limit exceeded. Try again later.' },
+});
+
 /**
  * LNURL-pay callback
  *
@@ -61,7 +70,7 @@ router.get('/:identifier', (req, res) => {
  * 3. If app is offline: server wallet creates invoice → stores pending payment
  *    → recipient claims when they open the app
  */
-router.get('/:identifier/callback', async (req, res) => {
+router.get('/:identifier/callback', lnurlCallbackLimiter, async (req, res) => {
   const { identifier } = req.params;
   const { amount, comment, source, sender } = req.query;
   const db = getDb();
