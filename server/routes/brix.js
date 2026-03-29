@@ -508,10 +508,10 @@ router.post('/link-pubkey', (req, res) => {
     return res.status(404).json({ error: 'BRIX não encontrado ou não verificado' });
   }
 
-  // Only allow linking if current key is a web placeholder (and caller provides any pubkey)
-  // or if the authenticated pubkey matches the current one
+  // Only allow linking if the authenticated pubkey matches the current one.
+  // Web-created accounts MUST be claimed via /claim-web-accounts (requires email verification).
   if (user.nostr_pubkey.startsWith('web_')) {
-    // Web-created account — allow first link
+    return res.status(403).json({ error: 'Contas web devem ser vinculadas via claim-web-accounts com verificação de email' });
   } else if (currentPubkey && currentPubkey === user.nostr_pubkey) {
     // Authenticated owner — allow re-link
   } else {
@@ -694,7 +694,7 @@ router.get('/resolve/:query', (req, res) => {
  * Body: { request_id, invoice }
  * Header: x-nostr-pubkey
  */
-router.post('/submit-invoice', (req, res) => {
+router.post('/submit-invoice', submitInvoiceLimiter, (req, res) => {
   const { request_id, invoice } = req.body;
   if (!req.verifiedPubkey) {
     return res.status(401).json({ error: 'NIP-98 authentication required' });
@@ -724,6 +724,16 @@ router.post('/submit-invoice', (req, res) => {
     return res.status(404).json({ error: 'Solicitação não encontrada' });
   }
 
+  // Validate that the submitted invoice amount matches the requested amount
+  const invoiceAmountSats = decodeBolt11AmountSats(invoice);
+  if (invoiceAmountSats === null || invoiceAmountSats <= 0) {
+    return res.status(400).json({ error: 'Invoice inválida ou sem valor' });
+  }
+  if (invoiceAmountSats !== request.amount_sats) {
+    console.log(`[SUBMIT] Amount mismatch: invoice=${invoiceAmountSats}, requested=${request.amount_sats}`);
+    return res.status(400).json({ error: 'Valor da invoice não corresponde ao solicitado' });
+  }
+
   db.prepare(`UPDATE brix_invoice_requests SET status = 'ready', invoice = ?, updated_at = datetime('now') WHERE id = ?`)
     .run(invoice, request_id);
 
@@ -735,7 +745,7 @@ router.post('/submit-invoice', (req, res) => {
  * GET /brix/invoice-requests/:pubkey
  * Get pending invoice requests for a user
  */
-router.get('/invoice-requests/:pubkey', (req, res) => {
+router.get('/invoice-requests/:pubkey', invoiceRequestsLimiter, (req, res) => {
   const { pubkey } = req.params;
   const username = req.query.username; // Optional: filter to specific BRIX account
   if (!req.verifiedPubkey || req.verifiedPubkey !== pubkey) {
@@ -1038,6 +1048,22 @@ const notifyProvidersLimiter = rateLimit({
   max: 5,               // Max 5 notifications per minute per pubkey
   keyGenerator: (req) => req.verifiedPubkey || req.ip,
   message: { error: 'Too many notifications. Try again later.' },
+});
+
+// Rate limit for submit-invoice (prevents invoice flooding)
+const submitInvoiceLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,              // Max 30 invoice submissions per minute per pubkey
+  keyGenerator: (req) => req.verifiedPubkey || req.ip,
+  message: { error: 'Too many invoice submissions. Try again later.' },
+});
+
+// Rate limit for invoice-requests polling (prevents DB write amplification)
+const invoiceRequestsLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,              // Max 60 polls per minute per pubkey (~1/sec)
+  keyGenerator: (req) => req.verifiedPubkey || req.ip,
+  message: { error: 'Too many requests. Try again later.' },
 });
 
 /**
