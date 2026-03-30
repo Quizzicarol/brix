@@ -113,10 +113,18 @@ async function sendPush(fcmToken, data) {
         apns: {
           headers: {
             'apns-priority': '10',
-            'apns-push-type': 'background',
+            'apns-push-type': 'alert',
           },
           payload: {
             aps: {
+              'alert': {
+                'title': data.type === 'brix_invoice_request' ? 'BRIX Payment' : 'Bro',
+                'body': data.type === 'brix_invoice_request'
+                  ? `Incoming payment: ${data.amount_sats || '?'} sats`
+                  : 'New notification',
+              },
+              'badge': 1,
+              'sound': 'default',
               'content-available': 1,
             },
           },
