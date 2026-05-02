@@ -140,37 +140,52 @@ router.get('/:identifier/callback', lnurlCallbackLimiter, async (req, res) => {
       }
     }
 
-    let sparkInvoice = null;
+    console.log(`[LNURL] Request ${requestId} for ${lnAddress}: ${amountSats} sats (source=${source || 'external'}) — racing app vs server fallback... (fcm=${hasFcm}, recentlySeen=${recentlySeen})`);
 
-    if (hasFcm || recentlySeen) {
-      console.log(`[LNURL] Request ${requestId} for ${lnAddress}: ${amountSats} sats (source=${source || 'external'}) — waiting for app... (fcm=${hasFcm}, recentlySeen=${recentlySeen})`);
-
-      // Always send FCM push immediately (in parallel with polling)
-      // so the app wakes up ASAP even if it missed a poll cycle
-      if (hasFcm) {
-        sendWakeUpPush(fcmUserId, requestId, amountSats).then(sent => {
-          if (sent) console.log(`[LNURL] Push sent to ${lnAddress}`);
-        }).catch(() => {});
-      }
-
-      // Single poll with appropriate timeout
-      // Recently seen (app actively polling): 45s — app polls every 1.5s but
-      // createInvoice can take up to 30s (Spark SDK timeout + sync)
-      // Not recently seen (needs FCM wake): 55s for cold SDK init
-      const timeout = recentlySeen ? 45000 : 55000;
-      sparkInvoice = await pollForInvoice(db, requestId, timeout);
-    } else {
-      // No FCM and not recently seen — still try polling, app might come online
-      console.log(`[LNURL] User ${identifier} has no FCM token and app not recently seen — polling with extended timeout`);
-      const EXTENDED_TIMEOUT = 55000;
-      sparkInvoice = await pollForInvoice(db, requestId, EXTENDED_TIMEOUT);
+    // Always send FCM push immediately (in parallel with polling)
+    // so the app wakes up ASAP even if it missed a poll cycle
+    if (hasFcm) {
+      sendWakeUpPush(fcmUserId, requestId, amountSats).then(sent => {
+        if (sent) console.log(`[LNURL] Push sent to ${lnAddress}`);
+      }).catch(() => {});
     }
+
+    // ── Parallel race: app Spark invoice vs server wallet fallback ──
+    //
+    // External LN wallets (Wallet of Satoshi, Coinos, etc.) typically time out
+    // LNURL callbacks at ~30s. We must respond within that window.
+    //
+    // Strategy:
+    //   1. Start server-wallet invoice creation immediately (in parallel)
+    //   2. Poll for app's Spark invoice with ~18s budget
+    //   3. If app wins → use Spark (preferred, direct routing)
+    //   4. Else → use server invoice (already in-flight, ~5s)
+    //
+    // Worst case: ~23s total, well within external wallet timeout.
+    const POLL_BUDGET_MS = 18000;
+    const memo = sanitizedComment
+      ? `BRIX: ${sanitizedComment}`
+      : `BRIX Payment to ${lnAddress}`;
+
+    // Kick off server invoice creation in parallel (only if wallet enabled)
+    let serverInvoicePromise = null;
+    if (wallet.isEnabled()) {
+      serverInvoicePromise = wallet.createInvoice(amountSats, memo)
+        .catch(err => {
+          console.error(`[LNURL] Server wallet invoice creation failed: ${err.message}`);
+          return null;
+        });
+    }
+
+    const sparkInvoice = await pollForInvoice(db, requestId, POLL_BUDGET_MS);
 
     // ── App responded with a Spark invoice ──
     if (sparkInvoice) {
       db.prepare(`UPDATE brix_invoice_requests SET status = 'completed' WHERE id = ?`).run(requestId);
-      console.log(`[LNURL] ✓ Spark invoice ready for ${lnAddress}: ${amountSats} sats`);
+      console.log(`[LNURL] ✓ Spark invoice ready for ${lnAddress}: ${amountSats} sats (app online)`);
 
+      // Server invoice (if any) was created but won't be paid — Spark SDK
+      // will let it expire naturally, no DB row created.
       return res.json({
         pr: sparkInvoice,
         routes: [],
@@ -184,14 +199,12 @@ router.get('/:identifier/callback', lnurlCallbackLimiter, async (req, res) => {
     // ── App didn't respond — use server wallet as offline fallback ──
     db.prepare(`UPDATE brix_invoice_requests SET status = 'expired' WHERE id = ?`).run(requestId);
 
-    if (wallet.isEnabled()) {
+    if (serverInvoicePromise) {
       console.log(`[LNURL] App offline for ${lnAddress} — using server wallet fallback for ${amountSats} sats`);
 
-      try {
-        const memo = sanitizedComment
-          ? `BRIX: ${sanitizedComment}`
-          : `BRIX Payment to ${lnAddress}`;
-        const { bolt11, paymentHash } = await wallet.createInvoice(amountSats, memo);
+      const serverInvoice = await serverInvoicePromise;
+      if (serverInvoice && serverInvoice.bolt11) {
+        const { bolt11, paymentHash } = serverInvoice;
 
         // Store as pending payment — will be forwarded when recipient comes online
         const pendingId = crypto.randomUUID();
@@ -211,13 +224,13 @@ router.get('/:identifier/callback', lnurlCallbackLimiter, async (req, res) => {
             message: `Pagamento de ${amountSats} sats será entregue a ${lnAddress} quando abrir o app.`,
           },
         });
-      } catch (walletErr) {
-        console.error(`[LNURL] Server wallet fallback failed: ${walletErr.message}`);
-        return res.json({
-          status: 'ERROR',
-          reason: 'Destinatário offline e fallback indisponível. Tente novamente.',
-        });
       }
+
+      console.error(`[LNURL] Server wallet fallback returned no invoice for ${lnAddress}`);
+      return res.json({
+        status: 'ERROR',
+        reason: 'Destinatário offline e fallback indisponível. Tente novamente.',
+      });
     } else {
       console.log(`[LNURL] ✗ App offline for ${lnAddress} — no Spark invoice generated. Server wallet disabled.`);
       return res.json({
