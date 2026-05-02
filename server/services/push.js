@@ -103,6 +103,32 @@ async function sendPush(fcmToken, data) {
   try {
     const accessToken = await getAccessToken();
 
+    // brix_invoice_request MUST be data-only / silent so the recipient app
+    // can generate a Spark invoice in the background WITHOUT user action.
+    // - apns-push-type: background  → triggers iOS silent background handler
+    // - apns-push-type: alert       → would show banner + suppress background → breaks invoice gen
+    //
+    // For other notification types (status updates etc.), use alert so iOS shows the banner.
+    // Regression history: commit 312ca4f changed BRIX to 'alert' which broke iOS background
+    // invoice generation — sender saw "Payment Failed: Problem processing the LNURL" from
+    // WoS while iOS showed an English banner that the recipient had no way to act on.
+    const isBrixInvoiceRequest = data.type === 'brix_invoice_request';
+    const apnsHeaders = {
+      'apns-priority': isBrixInvoiceRequest ? '5' : '10',
+      'apns-push-type': isBrixInvoiceRequest ? 'background' : 'alert',
+    };
+    const apsPayload = isBrixInvoiceRequest
+      ? { 'content-available': 1 }
+      : {
+          'alert': {
+            'title': 'Bro',
+            'body': 'New notification',
+          },
+          'badge': 1,
+          'sound': 'default',
+          'content-available': 1,
+        };
+
     const message = {
       message: {
         token: fcmToken,
@@ -111,22 +137,9 @@ async function sendPush(fcmToken, data) {
           priority: 'high',
         },
         apns: {
-          headers: {
-            'apns-priority': '10',
-            'apns-push-type': 'alert',
-          },
+          headers: apnsHeaders,
           payload: {
-            aps: {
-              'alert': {
-                'title': data.type === 'brix_invoice_request' ? 'BRIX Payment' : 'Bro',
-                'body': data.type === 'brix_invoice_request'
-                  ? `Incoming payment: ${data.amount_sats || '?'} sats`
-                  : 'New notification',
-              },
-              'badge': 1,
-              'sound': 'default',
-              'content-available': 1,
-            },
+            aps: apsPayload,
           },
         },
       },
