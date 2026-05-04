@@ -302,6 +302,30 @@ function initialize() {
     }
   } catch (e) { /* column may already exist */ }
 
+  // v565 SECURITY: hash verification codes (HMAC-SHA256 via BRIX_ENCRYPTION_KEY)
+  // and add failed_attempts counter to lock after 5 wrong tries.
+  try {
+    const vInfo = conn.prepare(`SELECT sql FROM sqlite_master WHERE name = 'brix_verifications'`).get();
+    if (vInfo && vInfo.sql && !vInfo.sql.includes('code_hash')) {
+      console.log('[DB] Migrating brix_verifications: adding code_hash + failed_attempts columns...');
+      conn.exec(`ALTER TABLE brix_verifications ADD COLUMN code_hash TEXT`);
+      conn.exec(`ALTER TABLE brix_verifications ADD COLUMN failed_attempts INTEGER DEFAULT 0`);
+      // Backfill existing UNUSED rows so legacy codes keep working transitorily
+      try {
+        const { hmacHash } = require('../services/encryption');
+        const pending = conn.prepare(`SELECT id, code FROM brix_verifications WHERE used = 0 AND code IS NOT NULL AND code != ''`).all();
+        const upd = conn.prepare(`UPDATE brix_verifications SET code_hash = ? WHERE id = ?`);
+        for (const r of pending) {
+          if (r.code) upd.run(hmacHash(r.code), r.id);
+        }
+        if (pending.length > 0) console.log(`[DB] Backfilled code_hash for ${pending.length} pending verifications`);
+      } catch (e) {
+        console.error('[DB] code_hash backfill error (continuing):', e.message);
+      }
+      console.log('[DB] Migration complete: code_hash + failed_attempts added');
+    }
+  } catch (e) { /* column may already exist */ }
+
   console.log('BRIX database initialized');
 }
 
