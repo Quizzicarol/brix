@@ -157,10 +157,11 @@ router.post('/register', async (req, res) => {
     const code = String(crypto.randomInt(100000, 999999));
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
     const verificationId = crypto.randomUUID();
+    // v565: store HMAC-hashed code; column 'code' kept empty for new rows
     db.prepare(`
-      INSERT INTO brix_verifications (id, user_id, code, type, destination, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(verificationId, userId, code, verifyVia, encrypt(destination), expiresAt);
+      INSERT INTO brix_verifications (id, user_id, code, code_hash, type, destination, expires_at)
+      VALUES (?, ?, '', ?, ?, ?, ?)
+    `).run(verificationId, userId, hmacHash(code), verifyVia, encrypt(destination), expiresAt);
     console.log(`[BRIX] Código de verificação (re-registro) enviado para ${cleanUsername} via ${verifyVia}`);
 
     let sent = false;
@@ -208,10 +209,11 @@ router.post('/register', async (req, res) => {
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
   const verificationId = crypto.randomUUID();
 
+  // v565: store HMAC-hashed code; plaintext only used to send via email/SMTP
   db.prepare(`
-    INSERT INTO brix_verifications (id, user_id, code, type, destination, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(verificationId, userId, code, verifyVia, encrypt(destination), expiresAt);
+    INSERT INTO brix_verifications (id, user_id, code, code_hash, type, destination, expires_at)
+    VALUES (?, ?, '', ?, ?, ?, ?)
+  `).run(verificationId, userId, hmacHash(code), verifyVia, encrypt(destination), expiresAt);
 
   console.log(`[BRIX] Código de verificação enviado para ${cleanUsername} via ${verifyVia}`);
 
@@ -262,14 +264,42 @@ router.post('/verify', async (req, res) => {
     }
     db.prepare("UPDATE brix_users SET verified = 1, updated_at = datetime('now') WHERE id = ?").run(user_id);
   } else {
-    // Email verification: check code in our database
+    // Email verification: lookup latest UNUSED unexpired row, then verify hash
     const verification = db.prepare(`
       SELECT * FROM brix_verifications
-      WHERE user_id = ? AND code = ? AND used = 0 AND expires_at > datetime('now')
+      WHERE user_id = ? AND used = 0 AND expires_at > datetime('now')
       ORDER BY created_at DESC LIMIT 1
-    `).get(user_id, code);
+    `).get(user_id);
 
     if (!verification) {
+      return res.status(400).json({ error: 'Código inválido ou expirado' });
+    }
+
+    // Lock after 5 failed attempts (defense vs brute force in 10-min window)
+    if ((verification.failed_attempts || 0) >= 5) {
+      db.prepare('UPDATE brix_verifications SET used = 1 WHERE id = ?').run(verification.id);
+      return res.status(400).json({ error: 'Código inválido ou expirado' });
+    }
+
+    // Constant-time compare. Prefer code_hash; fall back to legacy plaintext column
+    // for rows created before v565 migration that we couldn't backfill.
+    let ok = false;
+    try {
+      const inputHash = hmacHash(String(code));
+      if (verification.code_hash) {
+        const a = Buffer.from(verification.code_hash, 'hex');
+        const b = Buffer.from(inputHash, 'hex');
+        ok = a.length === b.length && crypto.timingSafeEqual(a, b);
+      } else if (verification.code) {
+        // Legacy row: compare plaintext in constant time
+        const a = Buffer.from(verification.code);
+        const b = Buffer.from(String(code));
+        ok = a.length === b.length && crypto.timingSafeEqual(a, b);
+      }
+    } catch (_) { ok = false; }
+
+    if (!ok) {
+      db.prepare('UPDATE brix_verifications SET failed_attempts = COALESCE(failed_attempts,0) + 1 WHERE id = ?').run(verification.id);
       return res.status(400).json({ error: 'Código inválido ou expirado' });
     }
 
@@ -335,10 +365,11 @@ router.post('/resend', async (req, res) => {
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
   const verificationId = crypto.randomUUID();
 
+  // v565: store HMAC-hashed code
   db.prepare(`
-    INSERT INTO brix_verifications (id, user_id, code, type, destination, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(verificationId, user_id, code, verifyVia, encrypt(destination), expiresAt);
+    INSERT INTO brix_verifications (id, user_id, code, code_hash, type, destination, expires_at)
+    VALUES (?, ?, '', ?, ?, ?, ?)
+  `).run(verificationId, user_id, hmacHash(code), verifyVia, encrypt(destination), expiresAt);
   console.log(`[BRIX] Novo código enviado para user ${user_id.slice(0,8)} via ${verifyVia}`);
 
   let sent = false;
@@ -883,10 +914,11 @@ router.post('/update-contact', async (req, res) => {
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
   const verificationId = crypto.randomUUID();
 
+  // v565: store HMAC-hashed code
   db.prepare(`
-    INSERT INTO brix_verifications (id, user_id, code, type, destination, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(verificationId, user.id, code, verifyVia, encrypt(destination), expiresAt);
+    INSERT INTO brix_verifications (id, user_id, code, code_hash, type, destination, expires_at)
+    VALUES (?, ?, '', ?, ?, ?, ?)
+  `).run(verificationId, user.id, hmacHash(code), verifyVia, encrypt(destination), expiresAt);
   console.log(`[BRIX] Update-contact code enviado para user ${user.id.slice(0,8)} via ${verifyVia}`);
 
   let sent = false;
@@ -937,14 +969,38 @@ router.post('/confirm-update', async (req, res) => {
     }
     db.prepare("UPDATE brix_users SET phone = ?, phone_hash = ?, updated_at = datetime('now') WHERE id = ?").run(encrypt(cleanPhone), hmacHash(cleanPhone), user.id);
   } else {
-    // Email-based: check code in our database
+    // Email-based: lookup latest UNUSED unexpired then verify hash (v565)
     const verification = db.prepare(`
       SELECT * FROM brix_verifications
-      WHERE user_id = ? AND code = ? AND used = 0 AND expires_at > datetime('now')
+      WHERE user_id = ? AND used = 0 AND expires_at > datetime('now')
       ORDER BY created_at DESC LIMIT 1
-    `).get(user.id, code);
+    `).get(user.id);
 
     if (!verification) {
+      return res.status(400).json({ error: 'Código inválido ou expirado' });
+    }
+
+    if ((verification.failed_attempts || 0) >= 5) {
+      db.prepare('UPDATE brix_verifications SET used = 1 WHERE id = ?').run(verification.id);
+      return res.status(400).json({ error: 'Código inválido ou expirado' });
+    }
+
+    let ok = false;
+    try {
+      const inputHash = hmacHash(String(code));
+      if (verification.code_hash) {
+        const a = Buffer.from(verification.code_hash, 'hex');
+        const b = Buffer.from(inputHash, 'hex');
+        ok = a.length === b.length && crypto.timingSafeEqual(a, b);
+      } else if (verification.code) {
+        const a = Buffer.from(verification.code);
+        const b = Buffer.from(String(code));
+        ok = a.length === b.length && crypto.timingSafeEqual(a, b);
+      }
+    } catch (_) { ok = false; }
+
+    if (!ok) {
+      db.prepare('UPDATE brix_verifications SET failed_attempts = COALESCE(failed_attempts,0) + 1 WHERE id = ?').run(verification.id);
       return res.status(400).json({ error: 'Código inválido ou expirado' });
     }
 
