@@ -35,6 +35,39 @@ const notifyProvidersLimiter = rateLimit({
   message: { error: 'Too many notifications. Try again later.' },
 });
 
+// v572: Limiters for endpoints that send paid SMS/email. Without these,
+// an attacker could spam SMS verifications to arbitrary phone numbers,
+// racking up Twilio costs and abusing strangers' inboxes.
+const registerLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5, // 5 register attempts per IP per 15 min
+  keyGenerator: (req) => req.ip,
+  validate: false,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Muitas tentativas de cadastro. Tente novamente em 15 minutos.' },
+});
+
+const resendLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 3, // 3 resend per IP per 5 min
+  keyGenerator: (req) => req.ip,
+  validate: false,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Muitas solicitações de reenvio. Aguarde alguns minutos.' },
+});
+
+const updateContactLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 3, // 3 contact-change per pubkey per 10 min
+  keyGenerator: (req) => req.verifiedPubkey || req.ip,
+  validate: false,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Muitas atualizações de contato. Tente novamente mais tarde.' },
+});
+
 // debug-user endpoint REMOVED for security (information disclosure)
 
 /**
@@ -71,14 +104,24 @@ router.get('/check-username/:username', (req, res) => {
  * Body: { username, phone?, email?, nostr_pubkey? }
  * At least one of phone/email required for verification
  */
-router.post('/register', async (req, res) => {
+router.post('/register', registerLimiter, async (req, res) => {
   const { username, phone, email, nostr_pubkey: bodyPubkey } = req.body;
 
-  if (!username) {
+  if (!username || typeof username !== 'string' || username.length > 30) {
     return res.status(400).json({ error: 'Username obrigatório' });
   }
   if (!phone && !email) {
     return res.status(400).json({ error: 'Informe pelo menos um: celular ou email' });
+  }
+  // v572: bound phone/email to prevent oversized inputs being stored/encrypted.
+  if (phone !== undefined && (typeof phone !== 'string' || phone.length > 32)) {
+    return res.status(400).json({ error: 'Celular inválido' });
+  }
+  if (email !== undefined && (typeof email !== 'string' || email.length > 254)) {
+    return res.status(400).json({ error: 'Email inválido' });
+  }
+  if (bodyPubkey !== undefined && (typeof bodyPubkey !== 'string' || !/^[0-9a-f]{64}$/.test(bodyPubkey))) {
+    return res.status(400).json({ error: 'nostr_pubkey inválido' });
   }
 
   const cleanUsername = username.toLowerCase().trim();
@@ -331,7 +374,7 @@ router.post('/verify', async (req, res) => {
  * POST /brix/resend
  * Body: { user_id }
  */
-router.post('/resend', async (req, res) => {
+router.post('/resend', resendLimiter, async (req, res) => {
   const { user_id } = req.body;
 
   if (!user_id) {
@@ -872,7 +915,7 @@ router.get('/invoice-requests/:pubkey', invoiceRequestsLimiter, (req, res) => {
  * Body: { phone?, email? }
  * Requires NIP-98 cryptographic authentication
  */
-router.post('/update-contact', async (req, res) => {
+router.post('/update-contact', updateContactLimiter, async (req, res) => {
   const { phone, email } = req.body;
   const nostr_pubkey = req.verifiedPubkey;
 
@@ -881,6 +924,13 @@ router.post('/update-contact', async (req, res) => {
   }
   if (!phone && !email) {
     return res.status(400).json({ error: 'Informe o novo celular ou email' });
+  }
+  // v572: bound phone/email size
+  if (phone !== undefined && (typeof phone !== 'string' || phone.length > 32)) {
+    return res.status(400).json({ error: 'Celular inválido' });
+  }
+  if (email !== undefined && (typeof email !== 'string' || email.length > 254)) {
+    return res.status(400).json({ error: 'Email inválido' });
   }
 
   const db = getDb();
