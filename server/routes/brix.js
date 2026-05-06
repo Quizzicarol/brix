@@ -9,10 +9,13 @@ const { encrypt, decrypt, hmacHash } = require('../services/encryption');
 const wallet = require('../services/wallet');
 
 // Rate limiters (must be defined before routes that use them)
+// v570: validate:false avoids ERR_ERL_KEY_GEN_IPV6 crash on Fly.io when
+// keyGenerator returns an IPv6 address (matches bro-api pattern in v508).
 const submitInvoiceLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 30,
   keyGenerator: (req) => req.verifiedPubkey || req.ip,
+  validate: false,
   message: { error: 'Too many invoice submissions. Try again later.' },
 });
 
@@ -20,6 +23,7 @@ const invoiceRequestsLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
   keyGenerator: (req) => req.verifiedPubkey || req.ip,
+  validate: false,
   message: { error: 'Too many requests. Try again later.' },
 });
 
@@ -27,6 +31,7 @@ const notifyProvidersLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 5,
   keyGenerator: (req) => req.verifiedPubkey || req.ip,
+  validate: false,
   message: { error: 'Too many notifications. Try again later.' },
 });
 
@@ -1033,8 +1038,15 @@ router.post('/register-push', (req, res) => {
   if (!pubkey) {
     return res.status(401).json({ error: 'NIP-98 authentication required' });
   }
-  if (!fcm_token || typeof fcm_token !== 'string' || fcm_token.length < 20) {
+  // v570: tighter token validation. Real FCM tokens are ~142-200 chars,
+  // APNS direct ~64-200. Reject lengths outside that range and any
+  // non-base64url-safe characters (prevents stored-XSS / injection vectors
+  // when token is later embedded in HTTP requests to FCM).
+  if (!fcm_token || typeof fcm_token !== 'string' || fcm_token.length < 64 || fcm_token.length > 512) {
     return res.status(400).json({ error: 'Invalid FCM token' });
+  }
+  if (!/^[A-Za-z0-9_:.-]{64,512}$/.test(fcm_token)) {
+    return res.status(400).json({ error: 'Invalid FCM token format' });
   }
 
   const db = getDb();
