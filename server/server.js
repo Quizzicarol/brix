@@ -37,7 +37,10 @@ app.use(cors({
   ],
   methods: ['GET', 'POST'],
 }));
-app.use(express.json());
+// v566: capture raw body so NIP-98 payload tag (sha256 of body) can be verified
+app.use(express.json({
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+}));
 
 // NIP-98 HTTP Auth — verify signed requests (backward-compatible)
 app.use(nip98Auth);
