@@ -14,6 +14,23 @@ try {
   process.exit(1);
 }
 
+// v570: Replay protection — keep recently-seen event IDs in memory.
+// Without this, the same NIP-98 event could be reused for the entire timestamp
+// tolerance window. Even with payload-tag body-binding, an attacker who
+// captures one valid request can replay it (e.g. on GET endpoints with no body,
+// or on POST endpoints where the body is intentionally identical).
+const TIMESTAMP_TOLERANCE_SEC = 60; // tightened from 120 → 60s
+const REPLAY_WINDOW_MS = (TIMESTAMP_TOLERANCE_SEC + 5) * 1000;
+const REPLAY_MAX_SIZE = 10000;
+const seenEventIds = new Map(); // eventId → expiresAtMs
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, expiresAt] of seenEventIds) {
+    if (now > expiresAt) seenEventIds.delete(id);
+  }
+}, 60000).unref?.();
+
 /**
  * Verify a Nostr event's ID and Schnorr signature.
  */
@@ -59,11 +76,29 @@ function nip98Auth(req, res, next) {
         return next();
       }
 
-      // Timestamp must be within 2 minutes
+      // Timestamp must be within tolerance window
       const now = Math.floor(Date.now() / 1000);
-      if (Math.abs(now - event.created_at) > 120) {
+      if (Math.abs(now - event.created_at) > TIMESTAMP_TOLERANCE_SEC) {
         if (isAuthPath) console.log(`[NIP98] FAIL ${req.method} ${req.path}: timestamp expired (delta=${now - event.created_at}s)`);
         return next();
+      }
+
+      // v570: Replay protection — reject reused event IDs.
+      // Check BEFORE signature verify so attackers can't burn CPU.
+      if (typeof event.id === 'string' && /^[0-9a-f]{64}$/.test(event.id)) {
+        if (seenEventIds.has(event.id)) {
+          if (isAuthPath) console.log(`[NIP98] FAIL ${req.method} ${req.path}: replay detected (event ${event.id.substring(0,12)})`);
+          return next();
+        }
+        // Cap size to prevent unbounded growth under burst load
+        if (seenEventIds.size >= REPLAY_MAX_SIZE) {
+          const evict = Math.floor(REPLAY_MAX_SIZE / 10);
+          let i = 0;
+          for (const key of seenEventIds.keys()) {
+            if (i++ >= evict) break;
+            seenEventIds.delete(key);
+          }
+        }
       }
 
       // Verify method tag matches request method (required)
@@ -96,11 +131,33 @@ function nip98Auth(req, res, next) {
         }
       }
 
+      // v566: NIP-98 payload tag — binds auth event to request body (replay protection).
+      // Strict when present; lenient when absent (transitional, until all clients send it).
+      const payloadTag = (event.tags || []).find(t => t[0] === 'payload');
+      const methodHasBody = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method.toUpperCase());
+      if (payloadTag) {
+        const expected = (typeof payloadTag[1] === 'string' ? payloadTag[1] : '').toLowerCase();
+        const rawBody = req.rawBody && req.rawBody.length ? req.rawBody : Buffer.alloc(0);
+        const actual = crypto.createHash('sha256').update(rawBody).digest('hex');
+        if (expected !== actual) {
+          if (isAuthPath) console.log(`[NIP98] FAIL ${req.method} ${req.path}: payload hash mismatch (event=${expected.substring(0,12)}, body=${actual.substring(0,12)})`);
+          return next();
+        }
+      } else if (methodHasBody && req.rawBody && req.rawBody.length > 0) {
+        if (isAuthPath) console.log(`[NIP98] WARN ${req.method} ${req.path}: missing payload tag (transitional, will be required)`);
+      }
+
       // Verify cryptographic signature
       if (verifyNostrEvent(event)) {
         req.verifiedPubkey = event.pubkey;
         // Override header so existing route code automatically gets the verified pubkey
         req.headers['x-nostr-pubkey'] = event.pubkey;
+        // v570: Mark event as seen ONLY after full verification (signature + payload).
+        // This prevents attackers from polluting the replay set with random IDs,
+        // and confirms real one-time-use enforcement on legitimate requests.
+        if (typeof event.id === 'string') {
+          seenEventIds.set(event.id, Date.now() + REPLAY_WINDOW_MS);
+        }
         if (isAuthPath) console.log(`[NIP98] OK ${req.method} ${req.path} pubkey=${event.pubkey.substring(0,8)}...`);
       } else {
         if (isAuthPath) console.log(`[NIP98] FAIL ${req.method} ${req.path}: signature verification failed for ${event.pubkey.substring(0,8)}...`);

@@ -252,7 +252,8 @@ router.post('/verify', async (req, res) => {
   const db = getDb();
   const user = db.prepare('SELECT * FROM brix_users WHERE id = ?').get(user_id);
   if (!user) {
-    return res.status(404).json({ error: 'Usuário não encontrado' });
+    // v566: generic error to avoid user_id enumeration
+    return res.status(400).json({ error: 'Código inválido ou expirado' });
   }
 
   // If user registered with phone, verify via Twilio Verify API
@@ -335,7 +336,8 @@ router.post('/resend', async (req, res) => {
   const db = getDb();
   const user = db.prepare('SELECT * FROM brix_users WHERE id = ? AND verified = 0').get(user_id);
   if (!user) {
-    return res.status(404).json({ error: 'Usuário não encontrado ou já verificado' });
+    // v566: generic success to avoid enumeration of user_id / verification state
+    return res.json({ success: true, verified: false, message: 'Se necessário, um novo código será enviado.' });
   }
 
   const resendPhone = decrypt(user.phone);
