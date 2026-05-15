@@ -17,9 +17,26 @@
 
 const wallet = require('./wallet');
 const { getDb } = require('../models/database');
+const { sendClaimPush } = require('./push');
 
 const POLL_INTERVAL_MS = 3000;
 const MAX_FORWARD_ATTEMPTS = 3;
+
+// v573 BRIX auto-forward: backoff schedule (seconds) for repeating
+// brix_pending_claim pushes to the recipient app. Indices match
+// claim_push_attempts (0 = no push yet). After exhausting the schedule
+// we keep pushing every 6h until 7 days, then give up.
+const CLAIM_PUSH_BACKOFF_SECONDS = [
+  0,         // attempt #1: immediate
+  30,        // attempt #2: 30s later
+  120,       // attempt #3: +2min
+  300,       // attempt #4: +5min
+  900,       // attempt #5: +15min
+  3600,      // attempt #6: +1h
+  10800,     // attempt #7: +3h
+  21600,     // attempt #8+: +6h
+];
+const CLAIM_PUSH_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 let running = false;
 
@@ -167,6 +184,62 @@ async function tick() {
   `).run();
   if (expiredOffline.changes > 0) {
     console.log(`[FEE] Expired ${expiredOffline.changes} unpaid offline payment(s)`);
+  }
+
+  // ── 6. v573 Auto-forward: wake the recipient app to claim received payments ──
+  //
+  // While a payment sits in status='received' (server got the money, recipient
+  // hasn't claimed yet), keep sending silent FCM pushes so the app wakes up in
+  // background, generates an invoice, and POSTs /brix/claim — completing the
+  // forward without the user opening the app manually.
+  //
+  // Backoff schedule capped at 7 days; if still unclaimed after that, mark as
+  // 'claim_abandoned' for manual operator action.
+  const toRetry = db.prepare(`
+    SELECT id, user_id, amount_sats, net_amount_sats, created_at,
+           claim_push_attempts, last_claim_push_at
+    FROM brix_pending_payments
+    WHERE status = 'received'
+    ORDER BY created_at ASC
+    LIMIT 50
+  `).all();
+
+  const nowMs = Date.now();
+  for (const pp of toRetry) {
+    const createdMs = new Date(pp.created_at + 'Z').getTime();
+    // Give up after 7 days of unsuccessful pushes
+    if (nowMs - createdMs > CLAIM_PUSH_MAX_AGE_MS) {
+      db.prepare(`UPDATE brix_pending_payments SET status = 'claim_failed' WHERE id = ? AND status = 'received'`).run(pp.id);
+      console.warn(`[BRIX] ✗ Claim push abandoned after 7d: ${pp.id.substring(0, 8)}`);
+      continue;
+    }
+
+    const attempts = pp.claim_push_attempts || 0;
+    const backoffIdx = Math.min(attempts, CLAIM_PUSH_BACKOFF_SECONDS.length - 1);
+    const backoffSec = CLAIM_PUSH_BACKOFF_SECONDS[backoffIdx];
+
+    if (pp.last_claim_push_at) {
+      const lastMs = new Date(pp.last_claim_push_at + 'Z').getTime();
+      if (nowMs - lastMs < backoffSec * 1000) continue;
+    }
+
+    const amount = pp.net_amount_sats || pp.amount_sats;
+    try {
+      const result = await sendClaimPush(pp.user_id, pp.id, amount);
+      db.prepare(`
+        UPDATE brix_pending_payments
+        SET claim_push_attempts = ?, last_claim_push_at = datetime('now')
+        WHERE id = ?
+      `).run(attempts + 1, pp.id);
+
+      if (result.sent) {
+        console.log(`[BRIX] ⚡ Claim push #${attempts + 1} sent for ${pp.id.substring(0, 8)} (${amount} sats)`);
+      } else if (!result.unregistered) {
+        // sent=false without unregistered means no FCM token — wait for app to register
+      }
+    } catch (err) {
+      console.error(`[BRIX] Claim push error for ${pp.id.substring(0, 8)}: ${err.message}`);
+    }
   }
 }
 

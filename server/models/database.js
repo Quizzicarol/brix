@@ -326,6 +326,20 @@ function initialize() {
     }
   } catch (e) { /* column may already exist */ }
 
+  // v573 BRIX: auto-forward offline payments — track wake-up push retries.
+  // Adds two columns to brix_pending_payments so the server can periodically
+  // wake the recipient app to claim a `received` payment without requiring
+  // the user to manually open the app.
+  try {
+    const ppInfo3 = conn.prepare(`SELECT sql FROM sqlite_master WHERE name = 'brix_pending_payments'`).get();
+    if (ppInfo3 && ppInfo3.sql && !ppInfo3.sql.includes('claim_push_attempts')) {
+      console.log('[DB] Migrating brix_pending_payments: adding claim_push_attempts/last_claim_push_at...');
+      conn.exec(`ALTER TABLE brix_pending_payments ADD COLUMN claim_push_attempts INTEGER DEFAULT 0`);
+      conn.exec(`ALTER TABLE brix_pending_payments ADD COLUMN last_claim_push_at TEXT`);
+      console.log('[DB] Migration complete: claim_push_attempts + last_claim_push_at added');
+    }
+  } catch (e) { /* column may already exist */ }
+
   console.log('BRIX database initialized');
 }
 
