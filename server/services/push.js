@@ -103,8 +103,9 @@ async function sendPush(fcmToken, data) {
   try {
     const accessToken = await getAccessToken();
 
-    // brix_invoice_request MUST be data-only / silent so the recipient app
-    // can generate a Spark invoice in the background WITHOUT user action.
+    // brix_invoice_request and brix_pending_claim MUST be data-only / silent
+    // so the recipient app can generate/claim a Spark invoice in the background
+    // WITHOUT user action.
     // - apns-push-type: background  → triggers iOS silent background handler
     // - apns-push-type: alert       → would show banner + suppress background → breaks invoice gen
     //
@@ -112,15 +113,14 @@ async function sendPush(fcmToken, data) {
     // Regression history: commit 312ca4f changed BRIX to 'alert' which broke iOS background
     // invoice generation — sender saw "Payment Failed: Problem processing the LNURL" from
     // WoS while iOS showed an English banner that the recipient had no way to act on.
-    const isBrixInvoiceRequest = data.type === 'brix_invoice_request';
+    const isBrixSilent = data.type === 'brix_invoice_request' || data.type === 'brix_pending_claim';
     const apnsHeaders = {
-      'apns-priority': isBrixInvoiceRequest ? '5' : '10',
-      'apns-push-type': isBrixInvoiceRequest ? 'background' : 'alert',
+      'apns-priority': isBrixSilent ? '5' : '10',
+      'apns-push-type': isBrixSilent ? 'background' : 'alert',
     };
-    const apsPayload = isBrixInvoiceRequest
+    const apsPayload = isBrixSilent
       ? { 'content-available': 1 }
-      : {
-          'alert': {
+      : {          'alert': {
             'title': 'Bro',
             'body': 'New notification',
           },
@@ -220,4 +220,56 @@ async function sendWakeUpPush(userId, requestId, amountSats) {
   return result.sent;
 }
 
-module.exports = { sendPush, sendWakeUpPush };
+/**
+ * Send a wake-up push to claim a pending offline payment.
+ * Used by the auto-forward retry loop while a payment sits in status='received'.
+ * The app receives this in the FCM background handler (even when fully killed),
+ * generates a Spark invoice, and POSTs to /brix/claim — completing the forward
+ * without any user interaction.
+ *
+ * @param {string} userId - The brix_users.id
+ * @param {string} paymentId - brix_pending_payments.id
+ * @param {number} amountSats - net amount the app should request in its invoice
+ * @returns {Promise<{sent: boolean, unregistered: boolean}>}
+ */
+async function sendClaimPush(userId, paymentId, amountSats) {
+  const db = getDb();
+  let user = db.prepare('SELECT id, fcm_token, username, nostr_pubkey FROM brix_users WHERE id = ?').get(userId);
+
+  if (!user) {
+    return { sent: false, unregistered: false };
+  }
+
+  // If this user has no FCM token, look for a sibling with same pubkey
+  // (same Nostr identity, possibly a different username on the same device).
+  let fcmTokenUserId = user.id;
+  let fcmToken = user.fcm_token;
+  if (!fcmToken && user.nostr_pubkey && !user.nostr_pubkey.startsWith('web_')) {
+    const sibling = db.prepare(
+      'SELECT id, fcm_token FROM brix_users WHERE nostr_pubkey = ? AND id != ? AND fcm_token IS NOT NULL ORDER BY last_seen DESC LIMIT 1'
+    ).get(user.nostr_pubkey, user.id);
+    if (sibling && sibling.fcm_token) {
+      fcmToken = sibling.fcm_token;
+      fcmTokenUserId = sibling.id;
+    }
+  }
+
+  if (!fcmToken) {
+    return { sent: false, unregistered: false };
+  }
+
+  const result = await sendPush(fcmToken, {
+    type: 'brix_pending_claim',
+    payment_id: paymentId,
+    amount_sats: String(amountSats),
+  });
+
+  if (result.unregistered) {
+    console.log(`[PUSH] Clearing stale FCM token for ${user.username} (claim push UNREGISTERED)`);
+    db.prepare("UPDATE brix_users SET fcm_token = NULL WHERE id = ?").run(fcmTokenUserId);
+  }
+
+  return result;
+}
+
+module.exports = { sendPush, sendWakeUpPush, sendClaimPush };
