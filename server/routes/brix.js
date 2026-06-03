@@ -68,6 +68,17 @@ const updateContactLimiter = rateLimit({
   message: { error: 'Muitas atualizações de contato. Tente novamente mais tarde.' },
 });
 
+// v574: limiter for web-account claim email-code requests (sends paid email).
+const claimWebLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5, // 5 claim-code requests per pubkey/IP per 15 min
+  keyGenerator: (req) => req.verifiedPubkey || req.ip,
+  validate: false,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Muitas solicitações de verificação. Tente novamente em 15 minutos.' },
+});
+
 // debug-user endpoint REMOVED for security (information disclosure)
 
 /**
@@ -637,6 +648,147 @@ router.post('/link-pubkey', (req, res) => {
     username: cleanUsername,
     brix_address: `${cleanUsername}@${domain}`,
     message: 'Chave nostr vinculada ao BRIX com sucesso',
+  });
+});
+
+/**
+ * POST /brix/claim-web-request
+ * Body: { username }
+ * Requires NIP-98 auth.
+ * Sends an email verification code to the email on file for a web-created
+ * BRIX account so the authenticated nostr user can prove ownership and
+ * claim the account in the app (keeping the original username).
+ *
+ * v574: closes the deadlock where web-created accounts were unclaimable
+ * (register rejected the duplicate email, link-pubkey blocked web_ accounts,
+ * and claim-web-accounts needed a pre-existing verified email account).
+ */
+router.post('/claim-web-request', claimWebLimiter, async (req, res) => {
+  if (!req.verifiedPubkey) {
+    return res.status(401).json({ error: 'NIP-98 authentication required' });
+  }
+  const { username } = req.body;
+  if (!username) {
+    return res.status(400).json({ error: 'username obrigatório' });
+  }
+
+  const db = getDb();
+  const cleanUsername = String(username).toLowerCase().trim();
+  const user = db.prepare('SELECT id, nostr_pubkey, email FROM brix_users WHERE username = ? AND verified = 1').get(cleanUsername);
+
+  // Generic response to avoid username/account enumeration.
+  const generic = { success: true, verified: false, message: 'Se a conta existir, um código foi enviado para o email cadastrado.' };
+
+  // Only web-created accounts (web_ placeholder) can be claimed this way.
+  if (!user || !user.nostr_pubkey.startsWith('web_')) {
+    return res.json(generic);
+  }
+
+  const email = decrypt(user.email);
+  if (!email) {
+    return res.json(generic);
+  }
+
+  const hasSmtp = !!process.env.SMTP_USER;
+
+  // Invalidate previous unused codes for this account
+  db.prepare("UPDATE brix_verifications SET used = 1 WHERE user_id = ? AND used = 0").run(user.id);
+
+  const code = String(crypto.randomInt(100000, 999999));
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  const verificationId = crypto.randomUUID();
+  db.prepare(`
+    INSERT INTO brix_verifications (id, user_id, code, code_hash, type, destination, expires_at)
+    VALUES (?, ?, '', ?, 'email', ?, ?)
+  `).run(verificationId, user.id, hmacHash(code), encrypt(email), expiresAt);
+
+  if (hasSmtp) {
+    try {
+      await sendVerificationCode(email, code);
+    } catch (err) {
+      console.error(`[BRIX] Erro ao enviar email de claim: ${err.message}`);
+    }
+  }
+  console.log(`[BRIX] Claim web solicitado para ${cleanUsername} (código enviado ao email cadastrado)`);
+
+  return res.json(generic);
+});
+
+/**
+ * POST /brix/claim-web-verify
+ * Body: { username, code }
+ * Requires NIP-98 auth.
+ * Verifies the email code sent by /claim-web-request and links the web
+ * account to the authenticated nostr pubkey, keeping the username.
+ */
+router.post('/claim-web-verify', async (req, res) => {
+  if (!req.verifiedPubkey) {
+    return res.status(401).json({ error: 'NIP-98 authentication required' });
+  }
+  const callerPubkey = req.verifiedPubkey;
+  const { username, code } = req.body;
+  if (!username || !code) {
+    return res.status(400).json({ error: 'username e code obrigatórios' });
+  }
+
+  const db = getDb();
+  const cleanUsername = String(username).toLowerCase().trim();
+  const user = db.prepare('SELECT id, nostr_pubkey FROM brix_users WHERE username = ? AND verified = 1').get(cleanUsername);
+  if (!user || !user.nostr_pubkey.startsWith('web_')) {
+    return res.status(400).json({ error: 'Código inválido ou expirado' });
+  }
+
+  // Email verification: lookup latest UNUSED unexpired row, then verify hash
+  const verification = db.prepare(`
+    SELECT * FROM brix_verifications
+    WHERE user_id = ? AND used = 0 AND expires_at > datetime('now')
+    ORDER BY created_at DESC LIMIT 1
+  `).get(user.id);
+
+  if (!verification) {
+    return res.status(400).json({ error: 'Código inválido ou expirado' });
+  }
+
+  // Lock after 5 failed attempts (defense vs brute force in 10-min window)
+  if ((verification.failed_attempts || 0) >= 5) {
+    db.prepare('UPDATE brix_verifications SET used = 1 WHERE id = ?').run(verification.id);
+    return res.status(400).json({ error: 'Código inválido ou expirado' });
+  }
+
+  // Constant-time compare. Prefer code_hash; fall back to legacy plaintext column.
+  let ok = false;
+  try {
+    const inputHash = hmacHash(String(code));
+    if (verification.code_hash) {
+      const a = Buffer.from(verification.code_hash, 'hex');
+      const b = Buffer.from(inputHash, 'hex');
+      ok = a.length === b.length && crypto.timingSafeEqual(a, b);
+    } else if (verification.code) {
+      const a = Buffer.from(verification.code);
+      const b = Buffer.from(String(code));
+      ok = a.length === b.length && crypto.timingSafeEqual(a, b);
+    }
+  } catch (_) { ok = false; }
+
+  if (!ok) {
+    db.prepare('UPDATE brix_verifications SET failed_attempts = COALESCE(failed_attempts,0) + 1 WHERE id = ?').run(verification.id);
+    return res.status(400).json({ error: 'Código inválido ou expirado' });
+  }
+
+  const tx = db.transaction(() => {
+    db.prepare('UPDATE brix_verifications SET used = 1 WHERE id = ?').run(verification.id);
+    db.prepare("UPDATE brix_users SET nostr_pubkey = ?, updated_at = datetime('now') WHERE id = ?").run(callerPubkey, user.id);
+  });
+  tx();
+
+  const domain = process.env.BRIX_DOMAIN || 'brix.app';
+  console.log(`[BRIX] Conta web reivindicada: ${cleanUsername}@${domain} -> ${callerPubkey.substring(0, 16)}...`);
+
+  res.json({
+    success: true,
+    username: cleanUsername,
+    brix_address: `${cleanUsername}@${domain}`,
+    message: 'Conta web vinculada ao seu app com sucesso',
   });
 });
 
