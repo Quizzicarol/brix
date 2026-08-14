@@ -8,7 +8,8 @@
     "dev": "nodemon server.js"
   },
   "dependencies": {
-    "@breeztech/breez-sdk-spark": "^0.12.2-dev2",
+    "@breeztech/breez-sdk-spark": "^0.19.2",
+    "@noble/curves": "^1.8.0",
     "better-sqlite3": "^11.0.0",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
@@ -16,7 +17,6 @@
     "express-rate-limit": "^7.1.4",
     "helmet": "^7.1.0",
     "nodemailer": "^8.0.2",
-    "@noble/curves": "^1.8.0",
     "uuid": "^9.0.0"
   },
   "devDependencies": {

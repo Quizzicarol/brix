@@ -121,6 +121,13 @@ function httpRequest(requestUrl, method, headers, body) {
     };
 
     const req = lib.request(options, (res) => {
+      // Follow redirects (LNURL endpoints commonly 301/302 to a canonical host).
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume();
+        const next = new URL(res.headers.location, requestUrl).toString();
+        resolve(httpRequest(next, method, headers, body));
+        return;
+      }
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
@@ -157,6 +164,8 @@ function generatePreimage() {
 
 let sparkSdk = null;
 let sparkInitializing = false;
+let sparkSyncTimer = null;
+let sparkLnAddress = null;
 
 async function getSparkSdk() {
   if (sparkSdk) return sparkSdk;
@@ -187,11 +196,118 @@ async function getSparkSdk() {
     sparkSdk = await builder.build();
     console.log('[WALLET:spark] SDK initialized successfully');
 
+    // The WASM/Node SDK does NOT auto-claim incoming Lightning payments on its
+    // own — its background sync must be driven from JS. Without this, HTLCs
+    // that arrive at the SSP are never claimed and sit "pending" on the sender
+    // side forever (nothing lands in the wallet). Register an event listener
+    // and periodically sync to claim incoming transfers.
+    try {
+      await sparkSdk.addEventListener({
+        onEvent: (e) => {
+          if (e && e.type && e.type !== 'synced') {
+            if (e.type === 'paymentSucceeded' || e.type === 'paymentPending' || e.type === 'paymentFailed') {
+              const amt = e.payment && (e.payment.amount ?? e.payment.amountSats);
+              console.log(`[WALLET:spark] event ${e.type} amount=${amt}`);
+            } else {
+              console.log(`[WALLET:spark] event ${e.type}`);
+            }
+          }
+        },
+      });
+    } catch (e) {
+      console.error(`[WALLET:spark] addEventListener failed: ${e.message}`);
+    }
+
+    // Drive periodic sync so incoming Lightning transfers get claimed promptly.
+    if (!sparkSyncTimer) {
+      sparkSyncTimer = setInterval(() => {
+        if (sparkSdk) sparkSdk.syncWallet({}).catch((e) => {
+          console.error(`[WALLET:spark] syncWallet error: ${e && e.message}`);
+        });
+      }, 5000);
+      if (sparkSyncTimer.unref) sparkSyncTimer.unref();
+    }
+    // Kick an immediate sync to claim anything already waiting.
+    sparkSdk.syncWallet({}).catch(() => {});
+
     // Log balance
     try {
       const info = await sparkSdk.getInfo({});
-      console.log(`[WALLET:spark] Balance: ${info.balanceSat} sats`);
+      console.log(`[WALLET:spark] Balance: ${info.balanceSats} sats`);
     } catch (_) {}
+
+    // Register an SSP webhook so incoming Lightning payments are delivered to
+    // this (server) wallet even without a persistent realtime connection. The
+    // WASM/Node SDK does not hold a reliable receive stream; without a webhook
+    // the SSP has no way to notify us and the HTLC sits pending on the sender
+    // side forever. This is the officially supported server-side receive path.
+    try {
+      const domain = process.env.BRIX_DOMAIN || 'brix.brostr.app';
+      const webhookUrl = `https://${domain}/brix/spark-webhook`;
+      // vSEC: secret compartilhado — env var ou aleatório efêmero (NUNCA mais
+      // o default público 'brix-spark-webhook', que qualquer um conhecia).
+      const { webhookSecret } = require('./webhook-secret');
+      const secret = webhookSecret;
+      let existing = [];
+      try { existing = await sparkSdk.listWebhooks(); } catch (_) {}
+      const already = Array.isArray(existing) && existing.some(w => w && w.url === webhookUrl);
+      if (!already) {
+        await sparkSdk.registerWebhook({
+          url: webhookUrl,
+          secret,
+          eventTypes: [
+            { type: 'lightningReceiveFinished' },
+            { type: 'lightningSendFinished' },
+          ],
+        });
+        console.log(`[WALLET:spark] webhook registered -> ${webhookUrl}`);
+      } else {
+        console.log(`[WALLET:spark] webhook already registered -> ${webhookUrl}`);
+      }
+    } catch (e) {
+      console.error(`[WALLET:spark] registerWebhook failed: ${e && e.message}`);
+    }
+
+    // Register a Spark/Breez lightning address for THIS server wallet. In the
+    // current Spark model, registering a lightning address is what sets up the
+    // SSP-side receive channel (so incoming Lightning HTLCs are held, the wallet
+    // is notified, and the transfer is delivered/claimed). The app does this on
+    // setup — which is why the app receives fine — but the server wallet never
+    // did (getLightningAddress() was undefined) → external Lightning never
+    // reached it. This does NOT affect the @brix.brostr.app addresses (those are
+    // served by BRIX's own LNURL); it only enables the server wallet to receive.
+    try {
+      let la = null;
+      try { la = await sparkSdk.getLightningAddress(); } catch (_) {}
+      if (la && la.lightningAddress) {
+        sparkLnAddress = la;
+        console.log(`[WALLET:spark] lightning address present: ${la.lightningAddress}`);
+      } else {
+        const suffix = crypto.createHash('sha256')
+          .update(String(config.mnemonic)).digest('hex').slice(0, 8);
+        const candidates = [
+          process.env.BRIX_SERVER_LN_USERNAME,
+          'broserverwallet',
+          'brixserverwallet',
+          `broserver${suffix}`,
+        ].filter(Boolean);
+        for (const uname of candidates) {
+          try {
+            const info = await sparkSdk.registerLightningAddress({
+              username: uname,
+              description: 'BRIX server wallet',
+            });
+            sparkLnAddress = info;
+            console.log(`[WALLET:spark] lightning address registered: ${info && info.lightningAddress}`);
+            break;
+          } catch (e) {
+            console.error(`[WALLET:spark] registerLightningAddress('${uname}') failed: ${e && e.message}`);
+          }
+        }
+      }
+    } catch (e) {
+      console.error(`[WALLET:spark] lightning address setup error: ${e && e.message}`);
+    }
 
     return sparkSdk;
   } catch (err) {
@@ -202,19 +318,63 @@ async function getSparkSdk() {
 }
 
 const spark = {
+  // Fetch a bolt11 from THIS server wallet's own Breez lightning address LNURL.
+  // On a WASM/Node server, direct receivePayment(bolt11) invoices are NOT
+  // reliably delivered by the SSP (the HTLC sits pending on the sender side).
+  // Invoices obtained through the registered lightning address ARE delivered,
+  // because the Breez SSP hosts/holds them server-side and hands the transfer
+  // to the wallet (confirmed working). So we route receive through the address.
+  async createInvoiceViaLnAddress(amountSats) {
+    const info = sparkLnAddress;
+    if (!info) return null;
+    // Build the well-known LNURL-pay URL from the address (user@domain), and
+    // keep the SDK-provided lnurl.url as a secondary candidate.
+    const urls = [];
+    if (info.lightningAddress && info.lightningAddress.includes('@')) {
+      const [user, domain] = info.lightningAddress.split('@');
+      if (user && domain) urls.push(`https://${domain}/.well-known/lnurlp/${user}`);
+    }
+    if (info.lnurl && info.lnurl.url) urls.push(info.lnurl.url);
+    if (urls.length === 0) return null;
+    for (const lnurlUrl of urls) {
+      try {
+        const meta = await httpRequest(lnurlUrl, 'GET', {}, null);
+        if (!meta || !meta.callback) continue;
+        const amountMsat = Number(amountSats) * 1000;
+        if (meta.minSendable && amountMsat < Number(meta.minSendable)) return null;
+        if (meta.maxSendable && amountMsat > Number(meta.maxSendable)) return null;
+        const sep = meta.callback.includes('?') ? '&' : '?';
+        const cbRes = await httpRequest(`${meta.callback}${sep}amount=${amountMsat}`, 'GET', {}, null);
+        if (!cbRes || !cbRes.pr) continue;
+        const bolt11 = cbRes.pr;
+        const paymentHash = crypto.createHash('sha256').update(bolt11).digest('hex');
+        return { bolt11, paymentHash };
+      } catch (e) {
+        console.error(`[WALLET:spark] createInvoiceViaLnAddress(${lnurlUrl}) error: ${e && e.message}`);
+      }
+    }
+    return null;
+  },
+
   async createInvoice(amountSats, memo) {
     const sdk = await getSparkSdk();
+    // Use receivePayment (bolt11) which produces a plain-description invoice
+    // (bolt11 "d" tag), NOT a description-hash ("h" tag). External wallets
+    // following LUD-06 validate an "h" tag against our served LNURL metadata;
+    // a lightning-address LNURL invoice carries breez.tips's own metadata hash,
+    // which does NOT match ours and causes the payer's HTLC to hang. A plain
+    // "d" tag invoice is accepted without that cross-check. Receiving is armed
+    // by the registered lightning address, so these invoices now deliver.
     const resp = await sdk.receivePayment({
       paymentMethod: {
         type: 'bolt11Invoice',
         description: memo || 'BRIX Payment',
-        amountSats: BigInt(amountSats),
+        amountSats: Number(amountSats),
       },
     });
-    // Extract payment hash from bolt11
     const bolt11 = resp.paymentRequest;
-    // Use a hash of the bolt11 as identifier
     const paymentHash = crypto.createHash('sha256').update(bolt11).digest('hex');
+    console.log(`[WALLET:spark] receivePayment invoice for ${amountSats} sats`);
     return { bolt11, paymentHash };
   },
 
@@ -241,22 +401,39 @@ const spark = {
   async payInvoice(bolt11) {
     const sdk = await getSparkSdk();
     const prepareResp = await sdk.prepareSendPayment({
-      paymentRequest: bolt11,
-      amount: null,
-      tokenIdentifier: null,
-      conversionOptions: null,
-      feePolicy: null,
+      paymentRequest: { type: 'input', input: bolt11 },
     });
+    // vSEC: idempotencyKey derivado do hash do invoice (estável entre retries
+    // do MESMO invoice). Se um forward for re-tentado após crash/timeout, o
+    // SSP/SDK deduplica por essa chave — defesa em profundidade além da
+    // recuperação via checkOutgoingPayment no payment-forward.
+    const idempotencyKey = crypto.createHash('sha256').update(String(bolt11)).digest('hex');
     const sendResp = await sdk.sendPayment({
       prepareResponse: prepareResp,
-      options: {
-        type: 'bolt11Invoice',
-        preferSpark: false,
-        completionTimeoutSecs: 30,
-      },
-      idempotencyKey: null,
+      idempotencyKey,
     });
     return { paymentHash: sendResp.payment?.id || crypto.randomUUID() };
+  },
+
+  // vSEC: consulta pagamento ENVIADO por invoice — usado para recuperação
+  // pós-crash (nunca re-pagar um invoice que já foi pago antes do crash).
+  async checkOutgoingPayment(bolt11) {
+    if (!bolt11) return false;
+    try {
+      const sdk = await getSparkSdk();
+      const resp = await sdk.listPayments({
+        typeFilter: ['send'],
+        statusFilter: ['completed'],
+        limit: 50,
+        sortAscending: false,
+      });
+      return (resp.payments || []).some(p =>
+        p.details?.type === 'lightning' && p.details.invoice === bolt11
+      );
+    } catch (err) {
+      console.error(`[WALLET:spark] checkOutgoingPayment error: ${err.message}`);
+      return false;
+    }
   },
 
   // HODL not supported with Spark
@@ -366,6 +543,13 @@ const lnbits = {
       null,
     );
     return result.paid === true;
+  },
+
+  // vSEC: LNbits — não há lookup confiável de pagamento enviado por bolt11;
+  // retornar null ("incerto") força o forwarder a marcar p/ revisão manual
+  // em vez de arriscar duplo pagamento.
+  async checkOutgoingPayment(_bolt11) {
+    return null;
   },
 };
 
@@ -494,6 +678,14 @@ async function checkInvoicePaid(paymentHash, bolt11) {
   return provider.checkInvoicePaid(paymentHash, bolt11);
 }
 
+// vSEC: true = pago | false = não pago | null = incerto (provider não suporta)
+async function checkOutgoingPayment(bolt11) {
+  const provider = getProvider();
+  if (!provider) throw new Error('Wallet not configured');
+  if (typeof provider.checkOutgoingPayment !== 'function') return null;
+  return provider.checkOutgoingPayment(bolt11);
+}
+
 async function getWalletBalance() {
   const config = getWalletConfig();
   if (!config) return null;
@@ -502,7 +694,7 @@ async function getWalletBalance() {
     try {
       const sdk = await getSparkSdk();
       const info = await sdk.getInfo({});
-      return { balance_sats: Number(info.balanceSat), provider: 'spark' };
+      return { balance_sats: Number(info.balanceSats), provider: 'spark' };
     } catch (e) {
       return { balance_sats: 0, provider: 'spark', error: e.message };
     }
@@ -521,10 +713,64 @@ async function getWalletBalance() {
   return null;
 }
 
+/**
+ * Force an immediate wallet sync (claims any pending incoming Lightning
+ * transfers). Safe to call from the webhook handler. No-op for non-spark.
+ */
+async function syncNow() {  const config = getWalletConfig();
+  if (!config || config.provider !== 'spark') return false;
+  try {
+    const sdk = await getSparkSdk();
+    await sdk.syncWallet({});
+    try {
+      const info = await sdk.getInfo({});
+      console.log(`[WALLET:spark] syncNow balance=${Number(info.balanceSats)} sats`);
+      const resp = await sdk.listPayments({ limit: 8, sortAscending: false });
+      for (const p of (resp.payments || [])) {
+        const amt = p.amount ?? p.amountSats;
+        const inv = p.details && p.details.type === 'lightning' ? String(p.details.invoice || '').slice(0, 25) : '';
+        console.log(`[WALLET:spark] recent pay: type=${p.paymentType || p.type} status=${p.status} amt=${amt} ${inv}`);
+      }
+    } catch (di) {
+      console.error(`[WALLET:spark] syncNow debug error: ${di && di.message}`);
+    }
+    return true;
+  } catch (e) {
+    console.error(`[WALLET:spark] syncNow error: ${e && e.message}`);
+    return false;
+  }
+}
+
+async function parseInvoice(input) {
+  const config = getWalletConfig();
+  if (!config || config.provider !== 'spark') return null;
+  try {
+    const sdk = await getSparkSdk();
+    const details = await sdk.parse(input);
+    const now = Math.floor(Date.now() / 1000);
+    const secsLeft = (details.timestamp && details.expiry)
+      ? (details.timestamp + details.expiry - now) : null;
+    console.log(`[WALLET:spark] parse: type=${details.type} amountMsat=${details.amountMsat} expiry=${details.expiry}s timestamp=${details.timestamp} secsLeft=${secsLeft} payee=${String(details.payeePubkey || '').slice(0, 16)} hints=${(details.routingHints || []).length}`);
+    console.log(`[WALLET:spark] parse desc: description=${JSON.stringify(details.description)} descriptionHash=${details.descriptionHash}`);
+    try {
+      const hints = details.routingHints || [];
+      hints.forEach((h, i) => {
+        const hops = (h.hops || []).map(hop => `${String(hop.srcNodeId || hop.src || '').slice(0, 16)}#${hop.shortChannelId || hop.scid || ''}`).join(' -> ');
+        console.log(`[WALLET:spark] parse hint[${i}]: ${hops}`);
+      });
+    } catch (_) {}
+    return details;
+  } catch (e) {
+    console.error(`[WALLET:spark] parseInvoice error: ${e && e.message}`);
+    return null;
+  }
+}
+
 module.exports = {
   isEnabled, getMode, isHodlMode, generatePreimage,
   createInvoice, checkInvoicePaid,
   createHodlInvoice, settleHodlInvoice, cancelHodlInvoice,
   payInvoice, checkInvoiceHeld,
-  getWalletBalance,
+  checkOutgoingPayment,
+  getWalletBalance, syncNow, parseInvoice,
 };

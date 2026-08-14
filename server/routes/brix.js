@@ -82,6 +82,47 @@ const claimWebLimiter = rateLimit({
 // debug-user endpoint REMOVED for security (information disclosure)
 
 /**
+ * Fase 4: resolve a VERIFIED user by their primary pubkey OR a linked
+ * (recovery) pubkey. Primary match always wins. Linked pubkeys are only ever
+ * inserted for accounts the authenticated owner controls, so this is a safe
+ * recovery/bug safety net — not a new attack surface. Returns { id } or null.
+ */
+function findVerifiedUserByPubkey(db, pubkey) {
+  const primary = db.prepare(
+    'SELECT id FROM brix_users WHERE nostr_pubkey = ? AND verified = 1'
+  ).get(pubkey);
+  if (primary) return primary;
+
+  const link = db.prepare(
+    'SELECT user_id FROM brix_linked_pubkeys WHERE nostr_pubkey = ?'
+  ).get(pubkey);
+  if (link) {
+    const u = db.prepare(
+      'SELECT id FROM brix_users WHERE id = ? AND verified = 1'
+    ).get(link.user_id);
+    if (u) return u;
+  }
+  return null;
+}
+
+/**
+ * Fase 4: link an extra pubkey to a user as a recovery safety net.
+ * Refuses to link a pubkey that is ALREADY another account's primary
+ * (prevents cross-account hijacking of pending payments).
+ * Idempotent thanks to INSERT OR IGNORE + UNIQUE(nostr_pubkey).
+ */
+function safeLinkPubkey(db, userId, pubkey) {
+  if (!pubkey || !/^[0-9a-f]{64}$/.test(pubkey)) return;
+  const otherPrimary = db.prepare(
+    'SELECT id FROM brix_users WHERE nostr_pubkey = ? AND id != ?'
+  ).get(pubkey, userId);
+  if (otherPrimary) return; // belongs to someone else — never link
+  db.prepare(
+    'INSERT OR IGNORE INTO brix_linked_pubkeys (id, user_id, nostr_pubkey) VALUES (?, ?, ?)'
+  ).run(crypto.randomUUID(), userId, pubkey);
+}
+
+/**
  * GET /brix/check-username/:username
  * Check if a username is available
  */
@@ -406,6 +447,20 @@ router.post('/resend', resendLimiter, async (req, res) => {
   const hasSmtp = !!process.env.SMTP_USER;
   const hasSms = !!process.env.TWILIO_ACCOUNT_SID;
 
+  // vSEC: cap de códigos por usuário/dia. Sem isso, um atacante com rotação
+  // de IP (furando o rate limit por IP) podia pedir milhares de resends —
+  // cada código novo = 5 tentativas frescas contra um espaço de 1M (6 dígitos).
+  // Com cap de 10 códigos/dia: máx. 50 tentativas/dia ≈ 0,005% de chance.
+  // Retorna sucesso genérico (anti-enumeration) mas NÃO gera código novo.
+  const codesLast24h = db.prepare(`
+    SELECT COUNT(*) AS c FROM brix_verifications
+    WHERE user_id = ? AND created_at > datetime('now', '-1 day')
+  `).get(user_id);
+  if ((codesLast24h?.c || 0) >= 10) {
+    console.warn(`[BRIX] resend cap atingido p/ user ${user_id.slice(0, 8)} (10 códigos/24h)`);
+    return res.json({ success: true, verified: false, message: 'Se necessário, um novo código será enviado.' });
+  }
+
   // For SMS: Twilio Verify sends a new code
   if (verifyVia === 'sms' && hasSms) {
     let sent = false;
@@ -461,7 +516,7 @@ router.get('/pending-payments', (req, res) => {
   const nostr_pubkey = req.verifiedPubkey;
 
   const db = getDb();
-  const user = db.prepare('SELECT id FROM brix_users WHERE nostr_pubkey = ? AND verified = 1').get(nostr_pubkey);
+  const user = findVerifiedUserByPubkey(db, nostr_pubkey);
   if (!user) {
     return res.status(404).json({ error: 'Usuário não encontrado' });
   }
@@ -534,7 +589,7 @@ router.post('/claim', async (req, res) => {
   }
 
   const db = getDb();
-  const user = db.prepare('SELECT id FROM brix_users WHERE nostr_pubkey = ? AND verified = 1').get(nostr_pubkey);
+  const user = findVerifiedUserByPubkey(db, nostr_pubkey);
   if (!user) {
     return res.status(404).json({ error: 'Usuário não encontrado' });
   }
@@ -639,6 +694,17 @@ router.post('/link-pubkey', (req, res) => {
   }
 
   db.prepare("UPDATE brix_users SET nostr_pubkey = ?, updated_at = datetime('now') WHERE id = ?").run(nostr_pubkey, user.id);
+
+  // Fase 4: record BOTH the old and the new pubkey as linked recovery keys so a
+  // device migration is lossless — the owner can still access this account from
+  // either key even though only one is the primary. Owner is already NIP-98
+  // authenticated here, so this is safe.
+  try {
+    safeLinkPubkey(db, user.id, user.nostr_pubkey); // previous primary
+    safeLinkPubkey(db, user.id, nostr_pubkey);       // new primary
+  } catch (e) {
+    console.warn(`[BRIX] linked-pubkey record skipped: ${e.message}`);
+  }
 
   const domain = process.env.BRIX_DOMAIN || 'brix.app';
   console.log(`[BRIX] Pubkey vinculada: ${cleanUsername}@${domain} -> ${nostr_pubkey.substring(0, 16)}...`);
@@ -790,6 +856,58 @@ router.post('/claim-web-verify', async (req, res) => {
     brix_address: `${cleanUsername}@${domain}`,
     message: 'Conta web vinculada ao seu app com sucesso',
   });
+});
+
+/**
+ * GET /brix/linked-pubkeys
+ * Lists the extra recovery pubkeys linked to the authenticated account.
+ * Only the PRIMARY owner (authenticated via NIP-98) can see them.
+ */
+router.get('/linked-pubkeys', (req, res) => {
+  if (!req.verifiedPubkey) {
+    return res.status(401).json({ error: 'NIP-98 authentication required' });
+  }
+  const db = getDb();
+  const owner = db.prepare(
+    'SELECT id, nostr_pubkey FROM brix_users WHERE nostr_pubkey = ? AND verified = 1'
+  ).get(req.verifiedPubkey);
+  if (!owner) {
+    return res.status(404).json({ error: 'Usuário não encontrado' });
+  }
+  const linked = db.prepare(
+    'SELECT nostr_pubkey, created_at FROM brix_linked_pubkeys WHERE user_id = ? ORDER BY created_at ASC'
+  ).all(owner.id);
+  res.json({ primary: owner.nostr_pubkey, linked });
+});
+
+/**
+ * POST /brix/unlink-pubkey
+ * Body: { nostr_pubkey }
+ * Removes a linked recovery pubkey. Only the PRIMARY owner can unlink, and the
+ * primary key itself can never be removed. This is the "desvincular" action.
+ */
+router.post('/unlink-pubkey', (req, res) => {
+  if (!req.verifiedPubkey) {
+    return res.status(401).json({ error: 'NIP-98 authentication required' });
+  }
+  const { nostr_pubkey } = req.body;
+  if (!nostr_pubkey || !/^[0-9a-f]{64}$/.test(nostr_pubkey)) {
+    return res.status(400).json({ error: 'nostr_pubkey inválido' });
+  }
+  const db = getDb();
+  const owner = db.prepare(
+    'SELECT id, nostr_pubkey FROM brix_users WHERE nostr_pubkey = ? AND verified = 1'
+  ).get(req.verifiedPubkey);
+  if (!owner) {
+    return res.status(403).json({ error: 'Apenas o dono principal pode desvincular chaves' });
+  }
+  if (nostr_pubkey === owner.nostr_pubkey) {
+    return res.status(400).json({ error: 'Não é possível desvincular a chave principal' });
+  }
+  const del = db.prepare(
+    'DELETE FROM brix_linked_pubkeys WHERE user_id = ? AND nostr_pubkey = ?'
+  ).run(owner.id, nostr_pubkey);
+  res.json({ success: true, removed: del.changes });
 });
 
 /**
@@ -1394,3 +1512,6 @@ router.post('/notify-providers', notifyProvidersLimiter, async (req, res) => {
 });
 
 module.exports = router;
+// Fase 4: exported for unit testing the recovery-pubkey resolution logic.
+module.exports.findVerifiedUserByPubkey = findVerifiedUserByPubkey;
+module.exports.safeLinkPubkey = safeLinkPubkey;

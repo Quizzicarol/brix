@@ -76,6 +76,18 @@ app.use('/brix/resend', authLimiter);
 app.use('/brix/update-contact', authLimiter);
 app.use('/brix/confirm-update', authLimiter);
 
+// vSEC: rate limit dedicado para /brix/claim (movimenta dinheiro).
+// 30/15min por IP é folgado p/ uso legítimo (vários pagamentos pendentes)
+// e bloqueia floods automatizados. O claim em si já é atômico + autenticado.
+const claimLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many claim requests, please try again later' },
+});
+app.use('/brix/claim', claimLimiter);
+
 // Rate limiting for lookup endpoints (prevent enumeration/scraping)
 const lookupLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -101,6 +113,49 @@ app.use('/lnurlp/:identifier/callback', lnurlCallbackLimiter);
 
 // Serve static web frontend
 app.use(express.static(path.join(__dirname, '..', 'web')));
+
+// Spark SSP webhook — the Spark SSP calls this when an incoming Lightning
+// payment for the server wallet is received/finished. We immediately sync the
+// wallet (claims the pending transfer) and run a forward tick so the sats are
+// forwarded to the offline recipient. This makes offline receiving work
+// server-side without requiring the recipient's app to be open. The action is
+// idempotent and exposes no sensitive data.
+//
+// SECURITY (vSEC): the SSP signs every webhook call with an
+// `X-Spark-Signature` header = HMAC-SHA256(rawBody, webhookSecret). Verify it
+// BEFORE doing any work — without this, anyone could spam syncNow()/tick()
+// (DoS) or use the `parse` shortcut as an oracle.
+const { webhookSecret } = require('./services/webhook-secret');
+const crypto = require('crypto');
+app.post('/brix/spark-webhook', (req, res) => {
+  const signature = req.headers['x-spark-signature'];
+  const raw = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
+  const expected = crypto.createHmac('sha256', webhookSecret).update(raw).digest('hex');
+  const sigBuf = Buffer.from(String(signature || ''), 'utf8');
+  const expBuf = Buffer.from(expected, 'utf8');
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+    console.warn('[SPARK-WEBHOOK] REJEITADO: assinatura inválida/ausente');
+    return res.status(401).json({ ok: false, error: 'invalid signature' });
+  }
+  (async () => {
+    try {
+      console.log('[SPARK-WEBHOOK] received (assinatura OK): ' + JSON.stringify(req.body || {}));
+    } catch (_) {}
+    res.status(200).json({ ok: true });
+    try {
+      const wallet = require('./services/wallet');
+      if (req.body && req.body.parse) {
+        await wallet.parseInvoice(String(req.body.parse));
+        return;
+      }
+      await wallet.syncNow();
+      const paymentForward = require('./services/payment-forward');
+      if (paymentForward.tick) paymentForward.tick().catch(() => {});
+    } catch (e) {
+      console.error('[SPARK-WEBHOOK] handler error: ' + (e && e.message));
+    }
+  })();
+});
 
 // LNURL routes (public, follows LUD-16 spec)
 app.use('/.well-known/lnurlp', lnurlRoutes);

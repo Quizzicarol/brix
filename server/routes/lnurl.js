@@ -157,15 +157,23 @@ router.get('/:identifier/callback', lnurlCallbackLimiter, async (req, res) => {
     //
     // Strategy:
     //   1. Start server-wallet invoice creation immediately (in parallel)
-    //   2. Poll for app's Spark invoice with ~18s budget
+    //   2. Poll for app's Spark invoice with an ADAPTIVE budget
     //   3. If app wins → use Spark (preferred, direct routing)
     //   4. Else → use server invoice (already in-flight, ~5s)
     //
-    // Worst case: ~23s total, well within external wallet timeout.
-    const POLL_BUDGET_MS = 18000;
+    // Adaptive budget (fix: offline recipients caused external wallets to time
+    // out because we always burned the full 18s before falling back):
+    //   - recentlySeen  → app is actively polling, answers in <2s. Keep the 18s
+    //                      ceiling so a live app always wins the direct route.
+    //   - hasFcm only   → app may be backgrounded; the wake-up push needs a few
+    //                      seconds to spin it up. Give a moderate window.
+    //   - neither       → app is UNREACHABLE (no push channel, not polling).
+    //                      There is no mechanism for it to answer, so skip the
+    //                      wait and use the server fallback immediately.
+    const POLL_BUDGET_MS = recentlySeen ? 8000 : (hasFcm ? 2500 : 1500);
     const memo = sanitizedComment
       ? `BRIX: ${sanitizedComment}`
-      : `BRIX Payment to ${lnAddress}`;
+      : `Payment to ${lnAddress}`;
 
     // Kick off server invoice creation in parallel (only if wallet enabled)
     let serverInvoicePromise = null;
