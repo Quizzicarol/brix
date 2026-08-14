@@ -250,8 +250,28 @@ async function getSparkSdk() {
       const secret = webhookSecret;
       let existing = [];
       try { existing = await sparkSdk.listWebhooks(); } catch (_) {}
-      const already = Array.isArray(existing) && existing.some(w => w && w.url === webhookUrl);
-      if (!already) {
+      const existingHook = Array.isArray(existing)
+        ? existing.find(w => w && w.url === webhookUrl)
+        : null;
+
+      // vSEC: o objeto Webhook NÃO expõe o secret, então não dá para saber se o
+      // hook registrado usa o secret ANTIGO (inseguro) ou o novo. Quando estamos
+      // usando o secret NOVO via env (BRIX_WEBHOOK_SECRET), precisamos GARANTIR
+      // que o SSP assina com ele — senão a verificação HMAC do servidor rejeita
+      // webhooks LEGÍTIMOS (quebra recebimento offline). Estratégia: se existe
+      // um hook para a URL mas NÃO foi registrado por esta versão, re-registrar.
+      const usingNewSecret = !!process.env.BRIX_WEBHOOK_SECRET;
+      if (existingHook && usingNewSecret) {
+        try {
+          await sparkSdk.unregisterWebhook({ webhookId: existingHook.id });
+          console.log(`[WALLET:spark] webhook antigo removido p/ re-registro c/ novo secret (id=${existingHook.id})`);
+        } catch (e) {
+          console.error(`[WALLET:spark] unregisterWebhook falhou: ${e && e.message}`);
+        }
+      }
+
+      const stillThere = existingHook && !usingNewSecret;
+      if (!stillThere) {
         await sparkSdk.registerWebhook({
           url: webhookUrl,
           secret,
