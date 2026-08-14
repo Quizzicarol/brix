@@ -87,12 +87,26 @@ function initialize() {
       forwarded_at        TEXT
     );
 
+    -- Fase 4: extra nostr pubkeys linked to a BRIX account as a recovery/bug
+    -- safety net. The primary identity stays in brix_users.nostr_pubkey; these
+    -- are ADDITIONAL pubkeys the same verified owner controls. UNIQUE(nostr_pubkey)
+    -- prevents a pubkey being linked to two accounts (which would let one user
+    -- claim another's pending payments).
+    CREATE TABLE IF NOT EXISTS brix_linked_pubkeys (
+      id           TEXT PRIMARY KEY,
+      user_id      TEXT NOT NULL REFERENCES brix_users(id),
+      nostr_pubkey TEXT NOT NULL UNIQUE,
+      created_at   TEXT DEFAULT (datetime('now'))
+    );
+
     CREATE INDEX IF NOT EXISTS idx_users_username ON brix_users(username);
     CREATE INDEX IF NOT EXISTS idx_users_pubkey ON brix_users(nostr_pubkey);
     CREATE INDEX IF NOT EXISTS idx_pending_user ON brix_pending_payments(user_id, status);
     CREATE INDEX IF NOT EXISTS idx_pending_hash ON brix_pending_payments(payment_hash);
     CREATE INDEX IF NOT EXISTS idx_fee_status ON brix_fee_transactions(status);
     CREATE INDEX IF NOT EXISTS idx_fee_server_hash ON brix_fee_transactions(server_payment_hash);
+    CREATE INDEX IF NOT EXISTS idx_linked_pubkey ON brix_linked_pubkeys(nostr_pubkey);
+    CREATE INDEX IF NOT EXISTS idx_linked_user ON brix_linked_pubkeys(user_id);
   `);
 
   // Migration: add last_seen column to brix_users for relay activity tracking

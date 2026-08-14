@@ -39,9 +39,22 @@ const CLAIM_PUSH_BACKOFF_SECONDS = [
 const CLAIM_PUSH_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 let running = false;
+// vSEC: tick() é chamado pelo loop E pelo webhook — sem esta guarda, dois
+// ticks concorrentes poderiam pagar o MESMO invoice duas vezes.
+let tickInFlight = false;
 
 async function tick() {
   if (!wallet.isEnabled()) return;
+  if (tickInFlight) return; // já há um tick rodando — pular
+  tickInFlight = true;
+  try {
+    await _tickInner();
+  } finally {
+    tickInFlight = false;
+  }
+}
+
+async function _tickInner() {
   const db = getDb();
   const hodlMode = wallet.isHodlMode();
 
@@ -74,6 +87,48 @@ async function tick() {
   }
 
   // ── 2. Forward payments to recipients ──
+  //
+  // vSEC — recuperação pós-crash ANTES de novos forwards:
+  // Se o processo morreu DEPOIS de payInvoice() mas ANTES do UPDATE final, a
+  // linha fica travada em 'forwarding'. Sem esta etapa ela nunca era retomada
+  // (dinheiro preso) — e pior: um retry ingênuo pagaria o invoice DUAS vezes.
+  // Aqui: consultamos a wallet; se o pagamento já saiu, só concluímos o
+  // registro. Se incerto, marcamos p/ revisão manual (NUNCA re-pagar).
+  const stuck = db.prepare(`
+    SELECT * FROM brix_fee_transactions WHERE status = 'forwarding' ORDER BY paid_at ASC
+  `).all();
+
+  for (const tx of stuck) {
+    try {
+      const alreadyPaid = await wallet.checkOutgoingPayment(tx.recipient_invoice);
+      if (alreadyPaid === true) {
+        if (hodlMode) {
+          try { await wallet.settleHodlInvoice(tx.preimage); } catch (_) {}
+        }
+        db.prepare(`
+          UPDATE brix_fee_transactions
+          SET status = 'forwarded', forwarded_at = datetime('now')
+          WHERE id = ?
+        `).run(tx.id);
+        console.log(`[FEE] ✓ Recovered stuck forward (already paid): tx ${tx.id.substring(0, 8)}`);
+      } else if (alreadyPaid === false) {
+        // Pagamento NÃO saiu — seguro re-tentar: volta para a fila.
+        db.prepare(`UPDATE brix_fee_transactions SET status = ? WHERE id = ?`).run(hodlMode ? 'held' : 'paid', tx.id);
+        console.warn(`[FEE] Stuck forward not paid — re-queued: tx ${tx.id.substring(0, 8)}`);
+      } else {
+        // Incerto (provider não suporta lookup) — revisão manual, nunca re-pagar.
+        db.prepare(`
+          UPDATE brix_fee_transactions
+          SET status = 'failed', error = 'stuck_in_forwarding_needs_manual_review'
+          WHERE id = ?
+        `).run(tx.id);
+        console.error(`[FEE] ✗ Stuck forward, payment status UNCERTAIN — manual review: tx ${tx.id.substring(0, 8)}`);
+      }
+    } catch (err) {
+      console.error(`[FEE] Stuck-forward recovery error (tx ${tx.id.substring(0, 8)}): ${err.message}`);
+    }
+  }
+
   const readyStatus = hodlMode ? 'held' : 'paid';
   const toForward = db.prepare(`
     SELECT * FROM brix_fee_transactions WHERE status = ? ORDER BY paid_at ASC
@@ -81,7 +136,13 @@ async function tick() {
 
   for (const tx of toForward) {
     try {
-      db.prepare(`UPDATE brix_fee_transactions SET status = 'forwarding' WHERE id = ?`).run(tx.id);
+      // vSEC: claim ATÔMICO — só prossegue se ESTA instância mudou o status.
+      // Sem o `AND status = ?`, dois ticks concorrentes liam a mesma linha
+      // 'paid' e pagavam o invoice do recipiente DUAS vezes.
+      const claim = db.prepare(`
+        UPDATE brix_fee_transactions SET status = 'forwarding' WHERE id = ? AND status = ?
+      `).run(tx.id, readyStatus);
+      if (claim.changes !== 1) continue; // outro tick já pegou
       console.log(`[FEE] Forwarding ${tx.net_amount_sats} sats to recipient (tx ${tx.id.substring(0, 8)})...`);
 
       const result = await wallet.payInvoice(tx.recipient_invoice);
@@ -251,6 +312,11 @@ function start() {
   running = true;
   console.log(`[FEE] Atomic payment forwarder started (${wallet.isHodlMode() ? 'HODL' : 'regular'} mode)`);
 
+  // Warm up the wallet SDK at startup so its background sync/claim loop is
+  // always running — otherwise incoming Lightning HTLCs are only claimed while
+  // an invoice-creation happens to have initialized the SDK.
+  wallet.getWalletBalance().catch(() => {});
+
   const loop = async () => {
     if (!running) return;
     try {
@@ -302,4 +368,4 @@ function handleWebhook(paymentHash) {
   return false;
 }
 
-module.exports = { start, stop, handleWebhook };
+module.exports = { start, stop, handleWebhook, tick };
