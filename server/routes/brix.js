@@ -595,9 +595,11 @@ router.post('/claim', async (req, res) => {
   }
 
   // Atomic status transition: only claim if still 'received'
+  // vSEC: também salvar o invoice do destinatário — se o claim falhar, o retry
+  // automático (payment-forward) pode re-tentar sem pedir ao usuário de novo.
   const updated = db.prepare(
-    "UPDATE brix_pending_payments SET status = 'claiming' WHERE id = ? AND user_id = ? AND status = 'received'"
-  ).run(payment_id, user.id);
+    "UPDATE brix_pending_payments SET status = 'claiming', recipient_invoice = ? WHERE id = ? AND user_id = ? AND status = 'received'"
+  ).run(invoice, payment_id, user.id);
 
   if (updated.changes === 0) {
     return res.status(409).json({ error: 'Pagamento não encontrado ou já sendo resgatado' });

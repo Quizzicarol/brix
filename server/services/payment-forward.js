@@ -302,6 +302,86 @@ async function _tickInner() {
       console.error(`[BRIX] Claim push error for ${pp.id.substring(0, 8)}: ${err.message}`);
     }
   }
+
+  // ── 7. vSEC: Retry automático de claims que FALHARAM (claim_failed) ──
+  //
+  // Um claim falha (claim_failed) quando o servidor recebeu o dinheiro mas o
+  // pagamento do invoice do usuário falhou — tipicamente por erro TRANSITÓRIO
+  // do SDK Spark (ex: queda do Spark, 'Invalid TransferId format'). Antes, o
+  // dinheiro ficava PRESO até intervenção manual. Agora re-tentamos sozinhos.
+  //
+  // PROTEÇÃO ANTI-DUPLO-GASTO (crítica): antes de re-pagar, SEMPRE checar se o
+  // invoice já foi pago (checkOutgoingPayment). Se já saiu (pagamento parcial
+  // pós-crash), só marcar como 'forwarded' — NUNCA re-pagar.
+  const CLAIM_RETRY_MAX = 5;
+  const CLAIM_RETRY_BACKOFF_MS = [60_000, 300_000, 900_000, 3_600_000, 21_600_000]; // 1m,5m,15m,1h,6h
+  const failedClaims = db.prepare(`
+    SELECT id, user_id, amount_sats, net_amount_sats, recipient_invoice,
+           claim_retry_count, last_claim_retry_at
+    FROM brix_pending_payments
+    WHERE status = 'claim_failed' AND recipient_invoice IS NOT NULL
+    ORDER BY created_at ASC
+    LIMIT 20
+  `).all();
+
+  for (const fc of failedClaims) {
+    try {
+      const retries = fc.claim_retry_count || 0;
+      if (retries >= CLAIM_RETRY_MAX) {
+        // Esgotou as tentativas — deixar p/ revisão manual (não re-pagar cegamente).
+        continue;
+      }
+      // Respeitar o backoff entre tentativas
+      if (fc.last_claim_retry_at) {
+        const lastMs = new Date(fc.last_claim_retry_at + 'Z').getTime();
+        const wait = CLAIM_RETRY_BACKOFF_MS[Math.min(retries, CLAIM_RETRY_BACKOFF_MS.length - 1)];
+        if (Date.now() - lastMs < wait) continue;
+      }
+
+      // 1) ANTI-DUPLO-GASTO: já foi pago?
+      const alreadyPaid = await wallet.checkOutgoingPayment(fc.recipient_invoice);
+      if (alreadyPaid === true) {
+        db.prepare(`
+          UPDATE brix_pending_payments
+          SET status = 'forwarded', forwarded_at = datetime('now')
+          WHERE id = ?
+        `).run(fc.id);
+        console.log(`[BRIX] ✓ claim_failed recuperado (já estava pago): ${fc.id.substring(0, 8)}`);
+        continue;
+      }
+      if (alreadyPaid === null) {
+        // Provider não suporta lookup (incerto) — NÃO re-pagar. Revisão manual.
+        console.error(`[BRIX] ✗ claim_retry ${fc.id.substring(0, 8)}: status incerto (provider sem lookup) — pulando p/ segurança`);
+        continue;
+      }
+
+      // 2) Seguro re-tentar. Claim ATÔMICO (só esta instância prossegue).
+      const claim = db.prepare(`
+        UPDATE brix_pending_payments SET status = 'claiming'
+        WHERE id = ? AND status = 'claim_failed'
+      `).run(fc.id);
+      if (claim.changes !== 1) continue;
+
+      console.log(`[BRIX] 🔁 claim_retry #${retries + 1} para ${fc.id.substring(0, 8)} (${fc.net_amount_sats || fc.amount_sats} sats)...`);
+      const result = await wallet.payInvoice(fc.recipient_invoice);
+      db.prepare(`
+        UPDATE brix_pending_payments
+        SET status = 'forwarded', forwarded_at = datetime('now'), forward_hash = ?
+        WHERE id = ?
+      `).run(result.paymentHash, fc.id);
+      console.log(`[BRIX] ✓ claim_retry completo: ${fc.id.substring(0, 8)} forwarded`);
+    } catch (err) {
+      // Falhou de novo — volta para claim_failed e incrementa o contador.
+      const back = db.prepare(`
+        UPDATE brix_pending_payments
+        SET status = 'claim_failed', claim_retry_count = ?, last_claim_retry_at = datetime('now')
+        WHERE id = ? AND status = 'claiming'
+      `).run((fc.claim_retry_count || 0) + 1, fc.id);
+      if (back.changes === 1) {
+        console.error(`[BRIX] ✗ claim_retry #${(fc.claim_retry_count || 0) + 1} falhou p/ ${fc.id.substring(0, 8)}: ${err.message}`);
+      }
+    }
+  }
 }
 
 function start() {
