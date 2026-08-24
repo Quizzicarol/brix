@@ -354,6 +354,22 @@ function initialize() {
     }
   } catch (e) { /* column may already exist */ }
 
+  // vSEC: retry automático de claim_failed. Para re-tentar um claim que falhou
+  // (ex: erro transitório do SDK Spark durante uma queda), precisamos do invoice
+  // do destinatário (gerado pelo app no claim) + um contador de tentativas.
+  // Sem recipient_invoice, o invoice era PERDIDO no claim_failed e o dinheiro
+  // ficava preso até intervenção manual.
+  try {
+    const ppInfo4 = conn.prepare(`SELECT sql FROM sqlite_master WHERE name = 'brix_pending_payments'`).get();
+    if (ppInfo4 && ppInfo4.sql && !ppInfo4.sql.includes('recipient_invoice')) {
+      console.log('[DB] Migrating brix_pending_payments: adding recipient_invoice + claim_retry_count...');
+      conn.exec(`ALTER TABLE brix_pending_payments ADD COLUMN recipient_invoice TEXT`);
+      conn.exec(`ALTER TABLE brix_pending_payments ADD COLUMN claim_retry_count INTEGER DEFAULT 0`);
+      conn.exec(`ALTER TABLE brix_pending_payments ADD COLUMN last_claim_retry_at TEXT`);
+      console.log('[DB] Migration complete: recipient_invoice + claim_retry_count added');
+    }
+  } catch (e) { /* column may already exist */ }
+
   console.log('BRIX database initialized');
 }
 
