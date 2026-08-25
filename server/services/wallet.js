@@ -423,14 +423,14 @@ const spark = {
     const prepareResp = await sdk.prepareSendPayment({
       paymentRequest: { type: 'input', input: bolt11 },
     });
-    // vSEC: idempotencyKey derivado do hash do invoice (estável entre retries
-    // do MESMO invoice). Se um forward for re-tentado após crash/timeout, o
-    // SSP/SDK deduplica por essa chave — defesa em profundidade além da
-    // recuperação via checkOutgoingPayment no payment-forward.
-    const idempotencyKey = crypto.createHash('sha256').update(String(bolt11)).digest('hex');
+    // BUG FIX: REMOVIDO o idempotencyKey=sha256(invoice) que EU adicionei no
+    // Fix #4. O SDK interpretava o hex de 64 chars como um TransferId (que
+    // espera formato UUID) e rejeitava com 'Invalid TransferId format' —
+    // quebrando TODOS os pagamentos (até self-payment de 1 sat). O SDK já tem
+    // idempotência interna; o anti-duplo-gasto fica no payment-forward
+    // (claim atômico + checkOutgoingPayment), que é onde ele pertence.
     const sendResp = await sdk.sendPayment({
       prepareResponse: prepareResp,
-      idempotencyKey,
     });
     return { paymentHash: sendResp.payment?.id || crypto.randomUUID() };
   },
