@@ -583,10 +583,29 @@ router.post('/claim', async (req, res) => {
     return res.status(400).json({ error: 'Campos obrigatórios: payment_id, invoice' });
   }
 
+  // Auditoria 07/nov (MED-01): cap de tamanho — bolt11 real fica em 300-600
+  // chars; 5000 cobre invoices com rotas enormes e mata abuso de campo gigante.
+  if (typeof invoice !== 'string' || invoice.length > 5000) {
+    return res.status(400).json({ error: 'Invoice inválida (tamanho)' });
+  }
+
   // Validate bolt11 format
-  if (typeof invoice !== 'string' || !/^ln(bc|tb|bcrt)/i.test(invoice)) {
+  if (!/^ln(bc|tb|bcrt)/i.test(invoice)) {
     return res.status(400).json({ error: 'Invoice inválida' });
   }
+
+  // Auditoria 07/nov (MED-04): em produção SÓ mainnet (lnbc). A Spark SDK
+  // rejeitaria testnet mais abaixo, mas falhar cedo é mais claro e evita
+  // divergência de validação de valor entre o regex e o SDK.
+  if (process.env.NODE_ENV === 'production' && !invoice.toLowerCase().startsWith('lnbc')) {
+    return res.status(400).json({ error: 'Invoice inválida (rede incorreta)' });
+  }
+
+  // Auditoria 07/nov (CRIT-03 fase 1): LOG DE AUDITORIA de cada claim —
+  // quem, qual pagamento, hash da invoice. A fase 2 (invoice vinculada por
+  // nonce/description hash) vem numa release coordenada com o app.
+  const invHash = crypto.createHash('sha256').update(String(invoice)).digest('hex').slice(0, 16);
+  console.log(`[CLAIM-AUDIT] user=${nostr_pubkey.substring(0, 8)} payment=${String(payment_id).substring(0, 8)} invoiceHash=${invHash} ip=${req.ip}`);
 
   const db = getDb();
   const user = findVerifiedUserByPubkey(db, nostr_pubkey);

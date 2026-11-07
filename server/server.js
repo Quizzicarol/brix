@@ -38,7 +38,10 @@ app.use(cors({
   methods: ['GET', 'POST'],
 }));
 // v566: capture raw body so NIP-98 payload tag (sha256 of body) can be verified
+// Auditoria 07/nov (MED-01): limite explícito de corpo — bolt11 real tem
+// 300-600 chars; 32kb cobre com folga e mata abuso de payload gigante.
 app.use(express.json({
+  limit: '32kb',
   verify: (req, _res, buf) => { req.rawBody = buf; },
 }));
 
@@ -77,11 +80,12 @@ app.use('/brix/update-contact', authLimiter);
 app.use('/brix/confirm-update', authLimiter);
 
 // vSEC: rate limit dedicado para /brix/claim (movimenta dinheiro).
-// 30/15min por IP é folgado p/ uso legítimo (vários pagamentos pendentes)
-// e bloqueia floods automatizados. O claim em si já é atômico + autenticado.
+// Auditoria 07/nov (CRIT-03 fase 1): 30→10 por 15min — continua folgado pra
+// uso legítimo (o app clama em lote no open) e atraso maior contra drenagem
+// com chave roubada. O claim em si já é atômico + autenticado.
 const claimLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 30,
+  max: 10,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many claim requests, please try again later' },
@@ -99,17 +103,11 @@ const lookupLimiter = rateLimit({
 app.use('/brix/resolve', lookupLimiter);
 app.use('/brix/find-by-email', lookupLimiter);
 
-// Rate limiting for LNURL callback (prevent DDoS via invoice request flooding)
-const lnurlCallbackLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => req.params.identifier || req.ip,
-  message: { status: 'ERROR', reason: 'Too many payment requests. Try again in a minute.' },
-});
-app.use('/.well-known/lnurlp/:identifier/callback', lnurlCallbackLimiter);
-app.use('/lnurlp/:identifier/callback', lnurlCallbackLimiter);
+// Auditoria 07/nov (MED-02): o limiter do LNURL callback que existia AQUI
+// foi REMOVIDO — no nível app.use o req.params.identifier é undefined e o
+// keyGenerator caía em req.ip (bug IPv6 que derruba o limiter, mesmo erro do
+// v570). A proteção continua no limiter DENTRO de routes/lnurl.js, que roda
+// no router onde req.params existe.
 
 // Serve static web frontend
 app.use(express.static(path.join(__dirname, '..', 'web')));
@@ -174,6 +172,11 @@ app.get('/health', (req, res) => {
 // Admin-only debug endpoint — requires NIP-98 auth from ADMIN_PUBKEY
 const ADMIN_PUBKEY = process.env.ADMIN_PUBKEY || '';
 app.get('/debug/brix-status', (req, res) => {
+  // Auditoria 07/nov (BAIXO-01): negar POR DESIGN quando o env não está
+  // configurado (antes negava "por acaso" da comparação com string vazia).
+  if (!ADMIN_PUBKEY) {
+    return res.status(503).json({ error: 'admin endpoint desabilitado (ADMIN_PUBKEY ausente)' });
+  }
   if (!req.verifiedPubkey || req.verifiedPubkey !== ADMIN_PUBKEY) {
     return res.status(403).json({ error: 'admin auth required' });
   }
@@ -206,20 +209,11 @@ app.get('/debug/brix-status', (req, res) => {
 // Initialize database and start
 db.initialize();
 
-// One-time fix: carol's nostr_pubkey was incorrectly set to quizzicarol's pubkey
-try {
-  const conn = db.getDb();
-  const carolCorrectPubkey = '0b31181f021539d1afcda76e66577d5a7797a9603ac4a7aa46514745c8acfc26';
-  const carol = conn.prepare('SELECT nostr_pubkey FROM brix_users WHERE username = ? AND verified = 1').get('carol');
-  if (carol && carol.nostr_pubkey !== carolCorrectPubkey) {
-    conn.prepare('UPDATE brix_users SET nostr_pubkey = ? WHERE username = ? AND verified = 1').run(carolCorrectPubkey, 'carol');
-    console.log(`[FIX] Updated carol's nostr_pubkey from ${carol.nostr_pubkey?.substring(0,16)}... to ${carolCorrectPubkey.substring(0,16)}...`);
-  } else if (carol) {
-    console.log('[FIX] carol pubkey already correct');
-  }
-} catch (e) {
-  console.log('[FIX] Error fixing carol pubkey:', e.message);
-}
+// Auditoria 07/nov (ALTO-01): bloco "one-time fix" da pubkey da carol
+// REMOVIDO do startup — ele REESCREVIA a pubkey dela a cada restart (se um
+// dia ela trocar de chave, o servidor reverteria e os pagamentos iriam pra
+// chave velha). O banco já está correto; correções pontuais agora são só via
+// script administrativo manual, nunca no boot do servidor.
 
 // Startup diagnostic: check user states
 try {
