@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
+const bolt11 = require('bolt11'); // auditoria 07/nov: decode real (CRIT-03 fase 2)
 const rateLimit = require('express-rate-limit');
 const { getDb } = require('../models/database');
 const { sendVerificationCode } = require('../services/email');
@@ -182,6 +183,23 @@ router.post('/register', registerLimiter, async (req, res) => {
   }
 
   const nostr_pubkey = bodyPubkey || req.headers['x-nostr-pubkey'] || `web_${crypto.randomBytes(16).toString('hex')}`;
+
+  // Auditoria 07/nov (ALTO-02): pubkey nostr é PÚBLICA — sem prova de posse,
+  // qualquer um registrava username apontando pra chave de terceiro
+  // (squatting/phishing). Agora: pubkey real exige NIP-98 assinado pela
+  // MESMA chave. Rollout: REGISTER_PROOF_REQUIRED=1 depois do app novo
+  // dominar o campo (o app passou a assinar o register na v749).
+  if (!String(nostr_pubkey).startsWith('web_')) {
+    const proved = req.verifiedPubkey === nostr_pubkey;
+    if (!proved) {
+      if (process.env.REGISTER_PROOF_REQUIRED === '1') {
+        console.warn(`[BRIX] register rejeitado: pubkey sem prova de posse (${String(nostr_pubkey).substring(0, 8)})`);
+        return res.status(403).json({ error: 'Prova de posse da chave obrigatória. Atualize o app.' });
+      }
+      console.warn(`[BRIX] register transitional: pubkey sem NIP-98 (cliente velho) — aceito enquanto REGISTER_PROOF_REQUIRED != 1`);
+    }
+  }
+
   const db = getDb();
   // Normalize phone: strip non-digits and auto-fix Brazilian mobile numbers
   const rawPhone = phone ? phone.replace(/\D/g, '') : null;
@@ -567,6 +585,29 @@ function decodeBolt11AmountSats(bolt11) {
 }
 
 /**
+ * GET /brix/claim-nonce/:paymentId  (auditoria 07/nov — CRIT-03 fase 2)
+ * Gera o nonce que vincula a invoice do claim a ESTE pagamento e ESTE dono.
+ * O app chama antes de criar a invoice e embute `#<nonce>` na descrição.
+ */
+router.get('/claim-nonce/:paymentId', (req, res) => {
+  if (!req.verifiedPubkey) {
+    return res.status(401).json({ error: 'NIP-98 authentication required' });
+  }
+  const db = getDb();
+  const user = findVerifiedUserByPubkey(db, req.verifiedPubkey);
+  if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
+
+  const row = db.prepare(
+    "SELECT id FROM brix_pending_payments WHERE id = ? AND user_id = ? AND status = 'received'"
+  ).get(req.params.paymentId, user.id);
+  if (!row) return res.status(404).json({ error: 'Pagamento não encontrado' });
+
+  const nonce = crypto.randomBytes(4).toString('hex'); // 8 chars
+  db.prepare('UPDATE brix_pending_payments SET claim_nonce = ? WHERE id = ?').run(nonce, row.id);
+  res.json({ ok: true, nonce });
+});
+
+/**
  * POST /brix/claim
  * Body: { payment_id, invoice }
  * Requires NIP-98 authentication
@@ -627,6 +668,34 @@ router.post('/claim', async (req, res) => {
   // Load payment details after securing the lock
   const payment = db.prepare('SELECT * FROM brix_pending_payments WHERE id = ?').get(payment_id);
   const amountToPay = payment.net_amount_sats || payment.amount_sats;
+
+  // Auditoria 07/nov (CRIT-03 fase 2): invoice VINCULADA por nonce. O app
+  // pede um nonce (GET /brix/claim-nonce/:paymentId) e gera a invoice com a
+  // descrição contendo `#<nonce>` — prova de que a invoice foi criada pelo
+  // dono AGORA, pra ESTE pagamento (chave roubada sozinha não drena mais:
+  // sem o nonce fresco do endpoint autenticado, a invoice não cola).
+  // Rollout: CLAIM_NONCE_REQUIRED=1 só depois do app novo dominar o campo.
+  try {
+    const decoded = bolt11.decode(String(invoice));
+    const descTag = (decoded.tags || []).find(t => t.tagName === 'description');
+    const desc = descTag ? String(descTag.data || '') : '';
+    const nonce = payment.claim_nonce;
+    if (nonce) {
+      const ok = desc.includes('#' + nonce);
+      if (process.env.CLAIM_NONCE_REQUIRED === '1' && !ok) {
+        db.prepare("UPDATE brix_pending_payments SET status = 'received' WHERE id = ?").run(payment_id);
+        console.warn(`[BRIX] ✗ Claim rejeitado: invoice sem nonce (#${nonce}) — possível invoice de terceiro`);
+        return res.status(400).json({ error: 'Invoice não vinculada a este pagamento. Atualize o app.' });
+      }
+      if (!ok) console.warn(`[BRIX] claim transitional: invoice sem nonce (app velho) — aceito enquanto CLAIM_NONCE_REQUIRED != 1`);
+    }
+  } catch (e) {
+    // decode falhou: em modo estrito não dá pra validar o vínculo → rejeita
+    if (process.env.CLAIM_NONCE_REQUIRED === '1' && payment.claim_nonce) {
+      db.prepare("UPDATE brix_pending_payments SET status = 'received' WHERE id = ?").run(payment_id);
+      return res.status(400).json({ error: 'Invoice ilegível' });
+    }
+  }
 
   // Validate invoice amount matches expected amount
   const invoiceAmountSats = decodeBolt11AmountSats(invoice);

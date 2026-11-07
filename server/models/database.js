@@ -119,6 +119,18 @@ function initialize() {
     }
   } catch (e) { /* column may already exist */ }
 
+  // Auditoria 07/nov (CRIT-03 fase 2): nonce que vincula a invoice do claim
+  // ao pagamento+dono. Nullable — pagamentos antigos seguem sem nonce até o
+  // app pedir um.
+  try {
+    const ppSql = conn.prepare(`SELECT sql FROM sqlite_master WHERE name = 'brix_pending_payments'`).get();
+    if (ppSql && ppSql.sql && !ppSql.sql.includes('claim_nonce')) {
+      console.log('[DB] Migrating brix_pending_payments: adding claim_nonce...');
+      conn.exec(`ALTER TABLE brix_pending_payments ADD COLUMN claim_nonce TEXT`);
+      console.log('[DB] Migration complete: claim_nonce added');
+    }
+  } catch (e) { /* column may already exist */ }
+
   // Migration: add server wallet columns to brix_pending_payments for offline payments
   try {
     const ppInfo = conn.prepare(`SELECT sql FROM sqlite_master WHERE name = 'brix_pending_payments'`).get();
