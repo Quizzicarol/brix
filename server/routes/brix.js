@@ -913,6 +913,31 @@ router.post('/unlink-pubkey', (req, res) => {
 });
 
 /**
+ * GET /brix/admin/address-of/:pubkey  (07/nov — admin only)
+ * Resolve QUALQUER pubkey pro endereço BRIX. Uso: a mediadora paga um
+ * provedor SEM ele precisar abrir o app — o recebimento offline do BRIX
+ * segura os sats no servidor e ele resgata sozinho via /brix/pending-payments.
+ * Admins: env ADMIN_PUBKEYS (lista separada por vírgula) ou ADMIN_PUBKEY.
+ */
+const ADMIN_PUBKEYS = (process.env.ADMIN_PUBKEYS || process.env.ADMIN_PUBKEY || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+router.get('/admin/address-of/:pubkey', (req, res) => {
+  if (!req.verifiedPubkey || !ADMIN_PUBKEYS.includes(req.verifiedPubkey)) {
+    return res.status(403).json({ error: 'admin auth required' });
+  }
+  const { pubkey } = req.params;
+  if (!/^[0-9a-f]{64}$/.test(pubkey)) {
+    return res.status(400).json({ error: 'pubkey inválida' });
+  }
+  const db = getDb();
+  const domain = process.env.BRIX_DOMAIN || 'brix.app';
+  const user = db.prepare('SELECT username FROM brix_users WHERE nostr_pubkey = ? AND verified = 1 ORDER BY created_at ASC').get(pubkey)
+    || db.prepare('SELECT u.username FROM brix_linked_pubkeys lp JOIN brix_users u ON u.id = lp.user_id WHERE lp.nostr_pubkey = ? AND u.verified = 1').get(pubkey);
+  if (!user) return res.json({ found: false });
+  res.json({ found: true, username: user.username, brix_address: `${user.username}@${domain}` });
+});
+
+/**
  * GET /brix/address/:pubkey
  */
 router.get('/address/:pubkey', (req, res) => {
