@@ -548,9 +548,14 @@ router.get('/pending-payments', (req, res) => {
 function decodeBolt11AmountSats(bolt11) {
   if (!bolt11 || typeof bolt11 !== 'string') return null;
   const lower = bolt11.toLowerCase();
+  // vSEC: em producao aceitar SOMENTE mainnet (lnbc). Testnet/regtest
+  // (lntb/lnbcrt) passariam pela validacao de valor mas falhariam no SDK,
+  // poluindo claim_failed e o loop de retry. NODE_ENV!=='production' mantem
+  // tb/bcrt para desenvolvimento.
+  const isProd = (process.env.NODE_ENV === 'production') || (process.env.SPARK_NETWORK === 'mainnet');
+  const netRe = isProd ? /^lnbc(\d+)([munp]?)1/ : /^ln(?:bc|tb|bcrt)(\d+)([munp]?)1/;
   // BOLT11 format: ln<network><amount><multiplier>1<data>
-  // networks: bc (mainnet), tb (testnet), bcrt (regtest)
-  const match = lower.match(/^ln(?:bc|tb|bcrt)(\d+)([munp]?)1/);
+  const match = lower.match(netRe);
   if (!match) return null; // no amount encoded (0-amount invoice)
   const num = parseInt(match[1], 10);
   const multiplier = match[2];
@@ -584,7 +589,7 @@ router.post('/claim', async (req, res) => {
   }
 
   // Validate bolt11 format
-  if (typeof invoice !== 'string' || !/^ln(bc|tb|bcrt)/i.test(invoice)) {
+  if (typeof invoice !== 'string' || invoice.length > 5000 || !/^ln(bc|tb|bcrt)/i.test(invoice)) {
     return res.status(400).json({ error: 'Invoice inválida' });
   }
 
@@ -921,7 +926,20 @@ router.post('/unlink-pubkey', (req, res) => {
  */
 const ADMIN_PUBKEYS = (process.env.ADMIN_PUBKEYS || process.env.ADMIN_PUBKEY || '')
   .split(',').map(s => s.trim()).filter(Boolean);
-router.get('/admin/address-of/:pubkey', (req, res) => {
+// vSEC (auditoria N-ALTO-01): rate limit próprio (10/min por admin) — a rota
+// resolve pubkey→endereço; sem limite próprio, uma chave admin vazada viraria
+// ferramenta de enumeração em massa. O fallback brix_linked_pubkeys é MANTIDO:
+// é a feature de troca de dispositivo (chave nova resolve pro endereço antigo),
+// não um vazamento — removê-lo quebraria migração legítima.
+const adminAddrLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.verifiedPubkey || req.ip,
+  message: { error: 'Too many requests' },
+});
+router.get('/admin/address-of/:pubkey', adminAddrLimiter, (req, res) => {
   if (!req.verifiedPubkey || !ADMIN_PUBKEYS.includes(req.verifiedPubkey)) {
     return res.status(403).json({ error: 'admin auth required' });
   }

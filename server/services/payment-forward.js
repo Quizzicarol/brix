@@ -356,6 +356,24 @@ async function _tickInner() {
       }
 
       // 2) Seguro re-tentar. Claim ATÔMICO (só esta instância prossegue).
+            // vSEC anti-drenagem: REVALIDAR o valor do invoice contra o esperado antes
+      // de re-pagar. O claim manual grava recipient_invoice SEM provar posse do
+      // destinatario; sem esta checagem um invoice fraudulento seria re-pago
+      // automaticamente por ate ~9h. Decoder local (brix.js nao exporta o dele).
+      const expectedSats = fc.net_amount_sats || fc.amount_sats;
+      const decodedSats = (function decodeAmt(b) {
+        try {
+          const m = String(b || '').toLowerCase().match(/^ln(?:bc|tb|bcrt)(\d+)([munp]?)1/);
+          if (!m) return null;
+          const mult = { '': 1, m: 1e-3, u: 1e-6, n: 1e-9, p: 1e-12 }[m[2]];
+          if (mult == null) return null;
+          return Math.round(parseInt(m[1], 10) * mult * 1e8);
+        } catch (_) { return null; }
+      })(fc.recipient_invoice);
+      if (decodedSats == null || decodedSats !== expectedSats) {
+        console.error(`[BRIX] claim_retry ${fc.id.substring(0,8)}: invoice ${decodedSats} != esperado ${expectedSats} — NAO re-pagar, revisao manual`);
+        continue;
+      }
       const claim = db.prepare(`
         UPDATE brix_pending_payments SET status = 'claiming'
         WHERE id = ? AND status = 'claim_failed'

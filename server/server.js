@@ -39,6 +39,7 @@ app.use(cors({
 }));
 // v566: capture raw body so NIP-98 payload tag (sha256 of body) can be verified
 app.use(express.json({
+  limit: '32kb', // vSEC (audit MED-01): cap de payload; bodies reais ficam bem abaixo
   verify: (req, _res, buf) => { req.rawBody = buf; },
 }));
 
@@ -99,17 +100,10 @@ const lookupLimiter = rateLimit({
 app.use('/brix/resolve', lookupLimiter);
 app.use('/brix/find-by-email', lookupLimiter);
 
-// Rate limiting for LNURL callback (prevent DDoS via invoice request flooding)
-const lnurlCallbackLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => req.params.identifier || req.ip,
-  message: { status: 'ERROR', reason: 'Too many payment requests. Try again in a minute.' },
-});
-app.use('/.well-known/lnurlp/:identifier/callback', lnurlCallbackLimiter);
-app.use('/lnurlp/:identifier/callback', lnurlCallbackLimiter);
+// vSEC (audit): REMOVIDO o lnurlCallbackLimiter global daqui. Ele rodava na
+// fase app.use, onde req.params.identifier e undefined — o keyGenerator caia em
+// req.ip e disparava o bug ERR_ERL_KEY_GEN_IPV6. O limiter CORRETO ja existe em
+// routes/lnurl.js (dentro do router, onde req.params existe, por IP+identifier).
 
 // Serve static web frontend
 app.use(express.static(path.join(__dirname, '..', 'web')));
@@ -206,20 +200,10 @@ app.get('/debug/brix-status', (req, res) => {
 // Initialize database and start
 db.initialize();
 
-// One-time fix: carol's nostr_pubkey was incorrectly set to quizzicarol's pubkey
-try {
-  const conn = db.getDb();
-  const carolCorrectPubkey = '0b31181f021539d1afcda76e66577d5a7797a9603ac4a7aa46514745c8acfc26';
-  const carol = conn.prepare('SELECT nostr_pubkey FROM brix_users WHERE username = ? AND verified = 1').get('carol');
-  if (carol && carol.nostr_pubkey !== carolCorrectPubkey) {
-    conn.prepare('UPDATE brix_users SET nostr_pubkey = ? WHERE username = ? AND verified = 1').run(carolCorrectPubkey, 'carol');
-    console.log(`[FIX] Updated carol's nostr_pubkey from ${carol.nostr_pubkey?.substring(0,16)}... to ${carolCorrectPubkey.substring(0,16)}...`);
-  } else if (carol) {
-    console.log('[FIX] carol pubkey already correct');
-  }
-} catch (e) {
-  console.log('[FIX] Error fixing carol pubkey:', e.message);
-}
+// vSEC (audit ALTO-01): REMOVIDO o fix one-time da pubkey 'carol'. Ele rodava a
+// cada restart e SOBRESCREVERIA a chave se a usuaria trocasse de dispositivo
+// (nova chave reverte p/ a chave antiga a cada boot -> fundos presos/roubados).
+// Se o fix ainda for necessario, rodar UMA vez via: flyctl ssh console.
 
 // Startup diagnostic: check user states
 try {
