@@ -951,6 +951,9 @@ router.get('/admin/address-of/:pubkey', adminAddrLimiter, (req, res) => {
   const domain = process.env.BRIX_DOMAIN || 'brix.app';
   const user = db.prepare('SELECT username FROM brix_users WHERE nostr_pubkey = ? AND verified = 1 ORDER BY created_at ASC').get(pubkey)
     || db.prepare('SELECT u.username FROM brix_linked_pubkeys lp JOIN brix_users u ON u.id = lp.user_id WHERE lp.nostr_pubkey = ? AND u.verified = 1').get(pubkey);
+  // vSEC (auditoria N-ALTO-01, follow-up do revisor): log de auditoria de
+  // quem consultou o quê — rastro forense se uma chave admin vazar.
+  console.log(`[ADMIN-AUDIT] address-of: admin=${req.verifiedPubkey.substring(0, 8)} alvo=${pubkey.substring(0, 8)} found=${!!user}`);
   if (!user) return res.json({ found: false });
   res.json({ found: true, username: user.username, brix_address: `${user.username}@${domain}` });
 });
