@@ -355,6 +355,28 @@ async function _tickInner() {
         continue;
       }
 
+      // vSEC anti-drenagem (auditoria 08/11): REVALIDAR o valor do invoice
+      // contra o esperado antes de re-pagar. O claim manual grava
+      // recipient_invoice SEM provar posse do destinatário (CRIT-03); sem esta
+      // checagem um invoice fraudulento (mesmo valor, destino diferente... ou
+      // valor adulterado) seria re-pago automaticamente por até ~9h.
+      // COMPLEMENTAR ao nonce do CRIT-03: nonce prova POSSE, isto prova VALOR.
+      // Não remover quando CLAIM_NONCE_REQUIRED for ligado.
+      const expectedSats = fc.net_amount_sats || fc.amount_sats;
+      const decodedSats = (function decodeAmt(b) {
+        try {
+          const m = String(b || '').toLowerCase().match(/^ln(?:bc|tb|bcrt)(\d+)([munp]?)1/);
+          if (!m) return null;
+          const mult = { '': 1, m: 1e-3, u: 1e-6, n: 1e-9, p: 1e-12 }[m[2]];
+          if (mult == null) return null;
+          return Math.round(parseInt(m[1], 10) * mult * 1e8);
+        } catch (_) { return null; }
+      })(fc.recipient_invoice);
+      if (decodedSats == null || decodedSats !== expectedSats) {
+        console.error(`[BRIX] ✗ claim_retry ${fc.id.substring(0, 8)}: invoice ${decodedSats} != esperado ${expectedSats} — NÃO re-pagar, revisão manual`);
+        continue;
+      }
+
       // 2) Seguro re-tentar. Claim ATÔMICO (só esta instância prossegue).
       const claim = db.prepare(`
         UPDATE brix_pending_payments SET status = 'claiming'

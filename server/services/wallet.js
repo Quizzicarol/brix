@@ -402,16 +402,38 @@ const spark = {
     if (!bolt11) return false;
     try {
       const sdk = await getSparkSdk();
-      const resp = await sdk.listPayments({
-        typeFilter: ['receive'],
-        statusFilter: ['completed'],
-        paymentDetailsFilter: [{ type: 'lightning' }],
-        limit: 50,
-        sortAscending: false,
-      });
-      return resp.payments.some(p =>
-        p.details?.type === 'lightning' && p.details.invoice === bolt11
-      );
+      // vSEC (auditoria 08/11, N-ALTO-02): antes comparava a string do invoice
+      // só nos ÚLTIMOS 50 receives (limit: 50, sem paginação). Pagamento
+      // offline que chegasse após 50+ outros receives NUNCA era detectado →
+      // fundos presos em pending_payments pra sempre. Agora pagina até 500
+      // receives e compara case-insensitive (bech32 é case-insensitive; o SDK
+      // pode normalizar a caixa da string).
+      const wanted = String(bolt11).toLowerCase();
+      let prevFirstId = null;
+      for (let page = 0; page < 10; page++) {
+        const resp = await sdk.listPayments({
+          typeFilter: ['receive'],
+          statusFilter: ['completed'],
+          paymentDetailsFilter: [{ type: 'lightning' }],
+          limit: 50,
+          offset: page * 50,
+          sortAscending: false,
+        });
+        const payments = resp.payments || [];
+        if (payments.length === 0) break;
+        // Guarda contra SDK que ignore `offset` (loop de páginas idênticas)
+        const firstId = payments[0]?.id;
+        if (page > 0 && firstId === prevFirstId) break;
+        prevFirstId = firstId;
+        for (const p of payments) {
+          if (p.details?.type === 'lightning' &&
+              String(p.details.invoice || '').toLowerCase() === wanted) {
+            return true;
+          }
+        }
+        if (payments.length < 50) break; // última página
+      }
+      return false;
     } catch (err) {
       console.error(`[WALLET:spark] checkInvoicePaid error: ${err.message}`);
       return false;

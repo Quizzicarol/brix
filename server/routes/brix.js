@@ -1009,7 +1009,20 @@ router.post('/unlink-pubkey', (req, res) => {
  */
 const ADMIN_PUBKEYS = (process.env.ADMIN_PUBKEYS || process.env.ADMIN_PUBKEY || '')
   .split(',').map(s => s.trim()).filter(Boolean);
-router.get('/admin/address-of/:pubkey', (req, res) => {
+// vSEC (auditoria 08/11, N-ALTO-01): rate limit próprio (10/min por admin) —
+// a rota resolve pubkey→endereço; sem limite, uma chave admin vazada vira
+// ferramenta de enumeração em massa. O fallback brix_linked_pubkeys é MANTIDO:
+// é a feature de troca de dispositivo (chave nova resolve pro endereço
+// antigo), não um vazamento — removê-lo quebraria migração legítima.
+const adminAddrLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.verifiedPubkey || req.ip,
+  message: { error: 'Too many requests' },
+});
+router.get('/admin/address-of/:pubkey', adminAddrLimiter, (req, res) => {
   if (!req.verifiedPubkey || !ADMIN_PUBKEYS.includes(req.verifiedPubkey)) {
     return res.status(403).json({ error: 'admin auth required' });
   }
@@ -1021,6 +1034,9 @@ router.get('/admin/address-of/:pubkey', (req, res) => {
   const domain = process.env.BRIX_DOMAIN || 'brix.app';
   const user = db.prepare('SELECT username FROM brix_users WHERE nostr_pubkey = ? AND verified = 1 ORDER BY created_at ASC').get(pubkey)
     || db.prepare('SELECT u.username FROM brix_linked_pubkeys lp JOIN brix_users u ON u.id = lp.user_id WHERE lp.nostr_pubkey = ? AND u.verified = 1').get(pubkey);
+  // vSEC (follow-up do revisor): log de auditoria — rastro forense de quem
+  // consultou qual pubkey, se uma chave admin vazar.
+  console.log(`[ADMIN-AUDIT] address-of: admin=${req.verifiedPubkey.substring(0, 8)} alvo=${pubkey.substring(0, 8)} found=${!!user}`);
   if (!user) return res.json({ found: false });
   res.json({ found: true, username: user.username, brix_address: `${user.username}@${domain}` });
 });
