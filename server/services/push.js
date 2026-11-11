@@ -258,13 +258,50 @@ async function sendClaimPush(userId, paymentId, amountSats) {
     return { sent: false, unregistered: false };
   }
 
-  const result = await sendPush(fcmToken, {
-    type: 'brix_pending_claim',
-    payment_id: paymentId,
-    amount_sats: String(amountSats),
-  });
+  // v782 (smlbnr case): gate de versao. O claim exige assinatura DO DONO do
+    // seed no app. Se o build for anterior ao v587 (auto-forward background),
+    // o claim-push acorda o isolate mas o handler nao existe - push emitido,
+    // dinheiro retido, suporte cego. Bloquear na origem e logar na receita:
+    const MIN_CLAIM_BUILD = 587;
+    const buildRaw = user.app_build;
+    const build = (typeof buildRaw === 'number' && Number.isInteger(buildRaw)) ? buildRaw : null;
 
-  if (result.unregistered) {
+    const _logPush = (reason, result, opts = {}) => {
+      try {
+        db.prepare(`INSERT INTO brix_claim_push_log (id, user_id, payment_id, reason, result, unregistered, error, client_build) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          crypto.randomUUID(), userId, paymentId, reason, result,
+          opts.unregistered ? 1 : 0,
+          opts.error || null,
+          build != null ? String(build) : 'unknown'
+        );
+      } catch (e) { console.error('[PUSH] claim push log fail:', e.message); }
+    };
+
+    if (build != null && build < MIN_CLAIM_BUILD) {
+      const err = `outdated_build ${build} < ${MIN_CLAIM_BUILD} (claim nao dispara - precisa atualizar o app)`;
+      _logPush('blocked_build_gate', 'blocked', { error: err });
+      console.log(`[PUSH] v782 BLOCKED claim push ${paymentId}: ${err}`);
+      return { sent: false, unregistered: false, blocked: 'outdated_build' };
+    }
+    if (build == null) {
+      // Build desconhecido (app nunca enviou) = tratar como antigo ate prova contraria.
+      const err = 'unknown_build (app nunca enviou app_build - claim pode nao disparar)';
+      _logPush('blocked_unknown_build', 'blocked', { error: err });
+      console.log(`[PUSH] v782 BLOCKED claim push ${paymentId}: ${err}`);
+      return { sent: false, unregistered: false, blocked: 'unknown_build' };
+    }
+
+    const result = await sendPush(fcmToken, {
+      type: 'brix_pending_claim',
+      payment_id: paymentId,
+      amount_sats: String(amountSats),
+    });
+
+    // v782: receita persistente (aceito vs. rejectado pelo FCM). Log rotativo
+    // some em minutos; o INSERT permite o suporte provar entrega em query.
+    _logPush('claim_push', result.sent ? 'accepted_by_fcm' : 'rejected', { unregistered: result.unregistered });
+
+    if (result.unregistered) {
     console.log(`[PUSH] Clearing stale FCM token for ${user.username} (claim push UNREGISTERED)`);
     db.prepare("UPDATE brix_users SET fcm_token = NULL WHERE id = ?").run(fcmTokenUserId);
   }

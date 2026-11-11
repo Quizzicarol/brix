@@ -382,6 +382,45 @@ function initialize() {
     }
   } catch (e) { /* column may already exist */ }
 
+    // v782 (smlbnr case): observabilidade do claim-push. O FCM aceitar o push
+  // NAO prova entrega (iOS pode nunca entregar ao app). Sem receita persistente
+  // o suporte fica cego. Sem last_seen em chamada autenticada, nao da pra
+  // distinguir 'app morto' de 'app abriu e o claim falhou'. Colunas novas
+  // (app_build) + tabela nova (log + resultado de cada tentativa):
+  try {
+    const usersInfo = conn.prepare(`SELECT sql FROM sqlite_master WHERE name = 'brix_users'`).get();
+    if (usersInfo && usersInfo.sql && !usersInfo.sql.includes('app_build')) {
+      console.log('[DB] Migrating brix_users: adding app_build...');
+      conn.exec(`ALTER TABLE brix_users ADD COLUMN app_build INTEGER`);
+      console.log('[DB] Migration complete: app_build added');
+    }
+  } catch (e) { /* column may already exist */ }
+
+  try {
+    const tables = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='brix_claim_push_log'").get();
+    if (!tables) {
+      console.log('[DB] Creating brix_claim_push_log...');
+      conn.exec(`
+        CREATE TABLE brix_claim_push_log (
+          id          TEXT PRIMARY KEY,
+          user_id     TEXT NOT NULL REFERENCES brix_users(id),
+          payment_id  TEXT NOT NULL REFERENCES brix_pending_payments(id),
+          reason      TEXT,
+          result      TEXT NOT NULL,   -- 'accepted_by_fcm' | 'rejected' | 'blocked'
+          unregistered INTEGER DEFAULT 0,
+          error       TEXT,
+          sent_at     TEXT DEFAULT (datetime('now')),
+          client_build TEXT
+        );
+        CREATE INDEX idx_claim_push_payment ON brix_claim_push_log(payment_id, sent_at);
+        CREATE INDEX idx_claim_push_pending ON brix_claim_push_log(result, sent_at);
+      `);
+      console.log('[DB] brix_claim_push_log created');
+    }
+  } catch (e) {
+    console.error('[DB] brix_claim_push_log error (continuing):', e.message);
+  }
+
   console.log('BRIX database initialized');
 }
 

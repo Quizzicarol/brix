@@ -22,6 +22,10 @@ try {
 const TIMESTAMP_TOLERANCE_SEC = 60; // tightened from 120 → 60s
 const REPLAY_WINDOW_MS = (TIMESTAMP_TOLERANCE_SEC + 5) * 1000;
 const REPLAY_MAX_SIZE = 10000;
+// v782 (smlbnr case): throttle de UPDATE em brix_users.last_seen por pubkey
+// (5 min). Sem isso, um usuario ativo numa tela faminta de chamadas martela
+// o SQLite a cada request autenticado.
+let _lastSeenThrottle = null; // Map<pubkey, lastTouchMs>
 const seenEventIds = new Map(); // eventId → expiresAtMs
 
 setInterval(() => {
@@ -159,7 +163,24 @@ function nip98Auth(req, res, next) {
           seenEventIds.set(event.id, Date.now() + REPLAY_WINDOW_MS);
         }
         if (isAuthPath) console.log(`[NIP98] OK ${req.method} ${req.path} pubkey=${event.pubkey.substring(0,8)}...`);
-      } else {
+                // v782 (smlbnr case): registrar PROVA DE PRESENCA com throttling. Antes,
+                // 'last_seen' so era atualizado numa tela especifica do app. O suporte
+                // nao consegue distinguir 'app morto' de 'app abriu e claim falhou'
+                // (caso smlbnr: 14.585 sats, claim nunca disparado, push FCM aceito).
+                // Agora qualquer endpoint autenticado (pending-payments, claim, etc.)
+                // bate last_seen. Throttle de 5min por pubkey pra nao martelar o SQLite
+                // numa tela ativa (o relay faz a throttling no cliente, aqui e defesa).
+                try {
+                  const { getDb } = require('../models/database');
+                  const db = getDb();
+                  if (!_lastSeenThrottle) _lastSeenThrottle = new Map();
+                  const last = _lastSeenThrottle.get(event.pubkey) || 0;
+                  if (Date.now() - last > 5 * 60 * 1000) {
+                    db.prepare('UPDATE brix_users SET last_seen = datetime(\'now\') WHERE nostr_pubkey = ?').run(event.pubkey);
+                    _lastSeenThrottle.set(event.pubkey, Date.now());
+                  }
+                } catch (_) { /* nunca bloquear autenticacao por observabilidade */ }
+              } else {
         if (isAuthPath) console.log(`[NIP98] FAIL ${req.method} ${req.path}: signature verification failed for ${event.pubkey.substring(0,8)}...`);
       }
     } catch (e) {

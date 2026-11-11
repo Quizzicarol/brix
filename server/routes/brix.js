@@ -1493,16 +1493,25 @@ router.post('/register-push', (req, res) => {
   // APNS direct ~64-200. Reject lengths outside that range and any
   // non-base64url-safe characters (prevents stored-XSS / injection vectors
   // when token is later embedded in HTTP requests to FCM).
-  if (!fcm_token || typeof fcm_token !== 'string' || fcm_token.length < 64 || fcm_token.length > 512) {
+    if (!fcm_token || typeof fcm_token !== 'string' || fcm_token.length < 64 || fcm_token.length > 512) {
     return res.status(400).json({ error: 'Invalid FCM token' });
   }
   if (!/^[A-Za-z0-9_:.-]{64,512}$/.test(fcm_token)) {
     return res.status(400).json({ error: 'Invalid FCM token format' });
   }
 
+  // v782 (smlbnr case): armazenar o app_build no register. O claim-push
+  // checa se o patch que adiciona o handler pro claim esta instalado;
+  // build antiga = nao emitir push (loga em brix_claim_push_log). Clientes
+  // que nao mandam ficam NULL e sofrem o gate 'unknown_build'.
+  const appBuildRaw = req.body.app_build;
+  const appBuild = (typeof appBuildRaw === 'number' && Number.isInteger(appBuildRaw) && appBuildRaw > 0 && appBuildRaw < 100000)
+    ? appBuildRaw
+    : null;
+
   const db = getDb();
   // Update FCM token for ALL users with same pubkey (handles multiple usernames)
-  const result = db.prepare("UPDATE brix_users SET fcm_token = ?, updated_at = datetime('now') WHERE nostr_pubkey = ? AND verified = 1").run(fcm_token, pubkey);
+  const result = db.prepare("UPDATE brix_users SET fcm_token = ?, app_build = ?, updated_at = datetime('now') WHERE nostr_pubkey = ? AND verified = 1").run(fcm_token, appBuild, pubkey);
   if (result.changes === 0) {
     return res.status(404).json({ error: 'User not found' });
   }
@@ -1640,6 +1649,57 @@ router.post('/notify-providers', notifyProvidersLimiter, async (req, res) => {
 
   console.log(`[PROVIDER] New order push: ${sent}/${providers.length} sent, ${stale} stale tokens cleared (bill_type=${bill_type})`);
   res.json({ success: true, notified: sent, total_providers: providers.length });
+});
+
+/**
+ * GET /brix/admin/pending-support-report
+ * v782 (smlbnr case): diagnostica por que um pagamento nunca foi claimed.
+ * Admin only. Retorna pra cada pagamento 'received' pendente: last_seen
+ * (abriu o app depois dos sats?), app_build (gate de claim?), ultimo
+ * claim-push (aceito/bloqueado). Responde em query o que o caso smlbnr
+ * nao conseguia provar. // Rate limit + admin key, mesmo padrao da/rota
+ * address-of.
+ */
+const adminSupportLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  keyGenerator: (req) => req.verifiedPubkey || req.ip,
+  validate: false,
+  message: { error: 'Too many support report requests.' },
+});
+
+router.get('/admin/pending-support-report', adminSupportLimiter, (req, res) => {
+  if (!req.verifiedPubkey || !ADMIN_PUBKEYS.includes(req.verifiedPubkey)) {
+    return res.status(401).json({ error: 'Admin only' });
+  }
+  try {
+    const db = getDb();
+    const mineId = req.verifiedPubkey; // exclui o proprio admin do relatorio
+    const report = db.prepare(`
+      SELECT pp.id AS payment_id, pp.amount_sats, pp.created_at AS fund_received_at,
+             u.username, u.nostr_pubkey, u.app_build, u.last_seen,
+             (SELECT sent_at FROM brix_claim_push_log WHERE payment_id = pp.id ORDER BY sent_at DESC LIMIT 1) AS last_push_sent_at,
+             (SELECT result FROM brix_claim_push_log WHERE payment_id = pp.id ORDER BY sent_at DESC LIMIT 1) AS last_push_result,
+             (SELECT error FROM brix_claim_push_log WHERE payment_id = pp.id ORDER BY sent_at DESC LIMIT 1) AS last_push_error
+      FROM brix_pending_payments pp
+      JOIN brix_users u ON u.id = pp.user_id
+      WHERE pp.user_id NOT IN (SELECT id FROM brix_users WHERE nostr_pubkey = ?)
+        AND pp.status IN ('received')
+        AND pp.created_at <= datetime('now', '-1 hour')
+      ORDER BY pp.created_at DESC
+      LIMIT 100
+    `).all(mineId);
+    // Limpa dados pessoais: expose pubkey curto, nao inteiro
+    const redacted = report.map(r => ({
+      ...r,
+      nostr_pubkey: r.nostr_pubkey ? `${r.nostr_pubkey.substring(0, 8)}...` : null,
+    }));
+    console.log(`[BRIX-SUPPORT] pending-support-report requested by ${req.verifiedPubkey.substring(0, 8)}... (rows=${redacted.length})`);
+    res.json({ count: redacted.length, payments: redacted });
+  } catch (e) {
+    console.error('[BRIX-SUPPORT] pending-support-report error:', e.message);
+    res.status(500).json({ error: 'Failed to generate support report' });
+  }
 });
 
 module.exports = router;
