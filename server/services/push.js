@@ -94,7 +94,7 @@ async function getAccessToken() {
  * @param {object} data - Key-value data payload (strings only)
  * @returns {Promise<{sent: boolean, unregistered: boolean}>} result
  */
-async function sendPush(fcmToken, data) {
+async function sendPush(fcmToken, data, notify = null) {
   if (!PROJECT_ID) {
     console.log('[PUSH] FCM_PROJECT_ID not configured, skipping push');
     return { sent: false, unregistered: false };
@@ -129,17 +129,25 @@ async function sendPush(fcmToken, data) {
           'content-available': 1,
         };
 
+    // vNF: notify = alerta VISIVEL (admin/tesouraria) — o campo notification
+    // renderiza via SO mesmo com o app morto (nao precisa de handler no app).
+    // NUNCA usar nos fluxos silent de claim: la o notification quebra o
+    // background handler (regressao 312ca4f, ver comentario acima).
+    const apsFinal = notify
+      ? { 'alert': { 'title': notify.title, 'body': notify.body }, 'badge': 1, 'sound': 'default', 'content-available': 1 }
+      : apsPayload;
     const message = {
       message: {
         token: fcmToken,
         data: data,
+        ...(notify ? { notification: { title: notify.title, body: notify.body } } : {}),
         android: {
           priority: 'high',
         },
         apns: {
           headers: apnsHeaders,
           payload: {
-            aps: apsPayload,
+            aps: apsFinal,
           },
         },
       },
@@ -309,4 +317,42 @@ async function sendClaimPush(userId, paymentId, amountSats) {
   return result;
 }
 
-module.exports = { sendPush, sendWakeUpPush, sendClaimPush };
+/**
+ * vNF (21/11): alerta VISIVEL pra admin (tesouraria do servidor etc.).
+ * Alvo: brix_users cujo nostr_pubkey esteja em ADMIN_PUBKEYS/ADMIN_PUBKEY
+ * (mesmos envs que as rotas admin) e tenha fcm_token. Diferente dos pushes
+ * de claim, este e NOTIFICATION+data: aparece via SO mesmo com o app morto
+ * (nao precisa de codigo no app — zero toque no app, regra da dona).
+ */
+async function sendAdminAlertPush(title, body) {
+  const db = getDb();
+  const adminList = (process.env.ADMIN_PUBKEYS || process.env.ADMIN_PUBKEY || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  const t = String(title).slice(0, 120);
+  const b = String(body).slice(0, 300);
+  if (adminList.length === 0) {
+    console.warn(`[PUSH] sendAdminAlertPush sem ADMIN_PUBKEY(S) — alerta so no log: ${t} | ${b}`);
+    return { sent: false };
+  }
+  let sentAny = false;
+  for (const pk of adminList) {
+    try {
+      const row = db.prepare('SELECT id, fcm_token FROM brix_users WHERE nostr_pubkey = ? AND fcm_token IS NOT NULL ORDER BY last_seen DESC LIMIT 1').get(pk);
+      if (!row || !row.fcm_token) {
+        console.warn(`[PUSH] admin ${pk.substring(0, 8)} sem fcm_token — alerta so no log`);
+        continue;
+      }
+      const r = await sendPush(row.fcm_token, {
+        type: 'brix_admin_alert',
+        title: t,
+        body: b,
+      }, { title: t, body: b });
+      if (r.sent) sentAny = true;
+    } catch (e) {
+      console.error(`[PUSH] admin alert falhou p/ ${pk.substring(0, 8)}: ${e.message}`);
+    }
+  }
+  return { sent: sentAny };
+}
+
+module.exports = { sendPush, sendWakeUpPush, sendClaimPush, sendAdminAlertPush };

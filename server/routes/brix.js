@@ -710,6 +710,29 @@ router.post('/claim', async (req, res) => {
     return res.status(400).json({ error: 'Valor da invoice não corresponde ao pagamento' });
   }
 
+  // vNF (21/11): sem tesouraria p/ valor + reserva, NÃO tentar pagar — o erro
+  // Spark estacionava o dinheiro e queimava o retry transitório (caso
+  // 3c7c6467: 50.142 sats parados ~10h). Estaciona em needs_funding + alerta;
+  // o forwarder (payment-forward 7b) paga sozinho quando o saldo cobrir — o
+  // recipient_invoice já está gravado no flip atômico acima.
+  try {
+    const { FORWARD_MIN_RESERVE_SATS } = require('../services/payment-forward');
+    const { sendAdminAlertPush } = require('../services/push');
+    const bal = await wallet.getWalletBalance();
+    const balance = bal?.balance_sats ?? 0;
+    if (balance < amountToPay + FORWARD_MIN_RESERVE_SATS) {
+      const parkedNow = db.prepare("UPDATE brix_pending_payments SET status = 'needs_funding' WHERE id = ? AND status = 'claiming'").run(payment_id);
+      if (parkedNow.changes === 1) {
+        sendAdminAlertPush(
+          'Bro: servidor precisa de tesouraria',
+          `Repasse de ${amountToPay} sats estacionado (needs_funding, saldo ${balance}). Reforce a carteira do servidor que ele sai sozinho.`
+        ).catch(() => {});
+        console.error(`[BRIX] 💤 needs_funding no claim ${payment_id.substring(0, 8)}: saldo ${balance} < ${amountToPay}+${FORWARD_MIN_RESERVE_SATS}`);
+      }
+      return res.status(503).json({ error: 'Resgate em fila — concluído automaticamente em instantes. Nenhuma ação necessária.' });
+    }
+  } catch (_) { /* leitura de saldo falhou → segue o fluxo normal (tenta pagar) */ }
+
   try {
     // Actually pay the recipient's invoice from server Spark wallet
     console.log(`[BRIX] Claiming ${amountToPay} sats for user ${user.id.substring(0, 8)} — paying invoice...`);
@@ -731,11 +754,20 @@ router.post('/claim', async (req, res) => {
     });
   } catch (err) {
     // Don't revert to 'received' — payment may have been sent.
-    // Mark as 'claim_failed' for manual review.
-    db.prepare("UPDATE brix_pending_payments SET status = 'claim_failed', forward_hash = ? WHERE id = ?")
-      .run(err.message?.substring(0, 200) || 'unknown', payment_id);
+    // vNF: insufficient funds NÃO é falha transitória — needs_funding (o
+    // forwarder completa quando houver tesouraria; retry não é queimado).
+    const insufficient = /insufficient funds/i.test(err.message || '');
+    db.prepare("UPDATE brix_pending_payments SET status = ?, forward_hash = ? WHERE id = ?")
+      .run(insufficient ? 'needs_funding' : 'claim_failed', err.message?.substring(0, 200) || 'unknown', payment_id);
+    if (insufficient) {
+      const { sendAdminAlertPush } = require('../services/push');
+      sendAdminAlertPush(
+        'Bro: servidor precisa de tesouraria',
+        `Repasse de ${amountToPay} sats falhou por saldo (needs_funding). Reforce a carteira do servidor que ele sai sozinho.`
+      ).catch(() => {});
+    }
     console.error(`[BRIX] ✗ Claim failed for ${payment_id.substring(0, 8)}: ${err.message}`);
-    res.status(500).json({ error: 'Falha ao resgatar pagamento' });
+    res.status(500).json({ error: insufficient ? 'Resgate em fila — concluído automaticamente em instantes. Nenhuma ação necessária.' : 'Falha ao resgatar pagamento' });
   }
 });
 

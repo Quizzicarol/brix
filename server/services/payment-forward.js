@@ -17,9 +17,19 @@
 
 const wallet = require('./wallet');
 const { getDb } = require('../models/database');
-const { sendClaimPush } = require('./push');
+const { sendClaimPush, sendAdminAlertPush } = require('./push');
 
 const POLL_INTERVAL_MS = 3000;
+
+// vNF (21/11): reserva mínima de tesouraria pra taxa da arvore Spark. O
+// repasse que não cobre valor+reserva NÃO tenta à força (falhava com
+// 'insufficient funds' e ESTACIONAVA o dinheiro) — vira needs_funding e sai
+// sozinho quando o saldo cobrir. Caso real (claim 3c7c6467): 50.142 sats com
+// saldo 50.202 — faltaram ~60 sats de margem; dinheiro parou ~10h.
+const FORWARD_MIN_RESERVE_SATS = 2000;
+
+// falta de fundos NÃO é erro transitório (o retry existe pra ruído do SDK).
+const isInsufficientFunds = (msg) => /insufficient funds/i.test(String(msg || ''));
 const MAX_FORWARD_ATTEMPTS = 3;
 
 // v573 BRIX auto-forward: backoff schedule (seconds) for repeating
@@ -393,6 +403,23 @@ async function _tickInner() {
       `).run(result.paymentHash, fc.id);
       console.log(`[BRIX] ✓ claim_retry completo: ${fc.id.substring(0, 8)} forwarded`);
     } catch (err) {
+      // vNF: falta de fundos NÃO é transitória — estaciona em needs_funding
+      // SEM queimar tentativa (retry é pra ruído do SDK; caso 3c7c6467,
+      // 21/11: 50.142 sats parados após 5 retries à toa).
+      if (isInsufficientFunds(err.message)) {
+        const park = db.prepare(`
+          UPDATE brix_pending_payments SET status = 'needs_funding'
+          WHERE id = ? AND status = 'claiming'
+        `).run(fc.id);
+        if (park.changes === 1) {
+          console.error(`[BRIX] 💤 needs_funding (sem saldo p/ ${fc.amount_sats} sats): ${fc.id.substring(0, 8)} — retry intacto`);
+          sendAdminAlertPush(
+            'Bro: servidor precisa de tesouraria',
+            `Repasse de ${fc.amount_sats} sats estacionado (needs_funding). Reforce a carteira do servidor que ele sai sozinho.`
+          ).catch(() => {});
+        }
+        continue;
+      }
       // Falhou de novo — volta para claim_failed e incrementa o contador.
       const back = db.prepare(`
         UPDATE brix_pending_payments
@@ -402,6 +429,49 @@ async function _tickInner() {
       if (back.changes === 1) {
         console.error(`[BRIX] ✗ claim_retry #${(fc.claim_retry_count || 0) + 1} falhou p/ ${fc.id.substring(0, 8)}: ${err.message}`);
       }
+    }
+  }
+
+  // ── 7b. vNF: needs_funding — estacionado por falta de tesouraria ──
+  // NÃO é falha transitória: sem teto de tentativas porque não há erro — há
+  // fila. Quando o saldo cobre (valor + reserva), paga sozinho. Anti
+  // duplo-gasto idêntico ao retry de claim (checa se já saiu antes).
+  const parked = db.prepare(`
+    SELECT id, amount_sats, net_amount_sats, recipient_invoice
+    FROM brix_pending_payments
+    WHERE status = 'needs_funding' AND recipient_invoice IS NOT NULL
+    ORDER BY created_at ASC
+    LIMIT 20
+  `).all();
+
+  for (const nf of parked) {
+    try {
+      const bal = await wallet.getWalletBalance();
+      const balance = bal?.balance_sats ?? 0;
+      const amount = nf.net_amount_sats || nf.amount_sats;
+      if (balance < amount + FORWARD_MIN_RESERVE_SATS) continue; // ainda sem tesouraria
+
+      // ANTI-DUPLO-GASTO: já foi pago?
+      const alreadyPaid = await wallet.checkOutgoingPayment(nf.recipient_invoice);
+      if (alreadyPaid === true) {
+        db.prepare(`UPDATE brix_pending_payments SET status = 'forwarded', forwarded_at = datetime('now') WHERE id = ?`).run(nf.id);
+        console.log(`[BRIX] ✓ needs_funding recuperado (já estava pago): ${nf.id.substring(0, 8)}`);
+        continue;
+      }
+      if (alreadyPaid === null) continue; // incerto — não re-pagar
+
+      // Claim ATÔMICO (só esta instância prossegue)
+      const claim = db.prepare(`UPDATE brix_pending_payments SET status = 'claiming' WHERE id = ? AND status = 'needs_funding'`).run(nf.id);
+      if (claim.changes !== 1) continue;
+
+      console.log(`[BRIX] 💰 needs_funding liberado p/ ${nf.id.substring(0, 8)} (${amount} sats, saldo ${balance})`);
+      const result = await wallet.payInvoice(nf.recipient_invoice);
+      db.prepare(`UPDATE brix_pending_payments SET status = 'forwarded', forwarded_at = datetime('now'), forward_hash = ? WHERE id = ?`).run(result.paymentHash, nf.id);
+      console.log(`[BRIX] ✓ needs_funding pago: ${nf.id.substring(0, 8)} forwarded`);
+    } catch (err) {
+      const backTo = isInsufficientFunds(err.message) ? 'needs_funding' : 'claim_failed';
+      db.prepare(`UPDATE brix_pending_payments SET status = ? WHERE id = ? AND status = 'claiming'`).run(backTo, nf.id);
+      console.error(`[BRIX] ✗ needs_funding ${nf.id.substring(0, 8)} falhou (${err.message}) → ${backTo}`);
     }
   }
 }
@@ -470,4 +540,4 @@ function handleWebhook(paymentHash) {
   return false;
 }
 
-module.exports = { start, stop, handleWebhook, tick };
+module.exports = { start, stop, handleWebhook, tick, FORWARD_MIN_RESERVE_SATS };

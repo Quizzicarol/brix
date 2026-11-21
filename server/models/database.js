@@ -208,6 +208,54 @@ function initialize() {
     // Table might not exist yet
   }
 
+  // Migration: add 'needs_funding' status to brix_pending_payments
+  // (21/11/2026 — claim 3c7c6467: repasse falhou por 'insufficient funds'
+  // (sem margem p/ taxa da arvore Spark) e o retry TRANSITORIO queimou as 5
+  // tentativas, estacionando 50.142 sats ate intervencao manual.
+  // needs_funding = estacionado por falta de tesouraria: nao queima retry,
+  // sai sozinho quando o saldo cobre valor+reserva.)
+  try {
+    const ppInfo3 = conn.prepare(`SELECT sql FROM sqlite_master WHERE name = 'brix_pending_payments'`).get();
+    if (ppInfo3 && ppInfo3.sql && !ppInfo3.sql.includes('needs_funding')) {
+      console.log('[DB] Migrating brix_pending_payments: adding needs_funding status...');
+      conn.exec(`
+        ALTER TABLE brix_pending_payments RENAME TO brix_pending_payments_nf;
+
+        CREATE TABLE brix_pending_payments (
+          id              TEXT PRIMARY KEY,
+          user_id         TEXT REFERENCES brix_users(id),
+          amount_sats     INTEGER NOT NULL,
+          payment_hash    TEXT NOT NULL,
+          status          TEXT DEFAULT 'received' CHECK(status IN ('pending_payment', 'received', 'claiming', 'claim_failed', 'needs_funding', 'forwarding', 'forwarded', 'expired')),
+          sender_note     TEXT,
+          server_invoice  TEXT,
+          server_payment_hash TEXT,
+          fee_sats        INTEGER DEFAULT 0,
+          net_amount_sats INTEGER,
+          created_at      TEXT DEFAULT (datetime('now')),
+          forwarded_at    TEXT,
+          forward_hash    TEXT,
+          claim_push_attempts INTEGER DEFAULT 0,
+          last_claim_push_at TEXT,
+          recipient_invoice TEXT,
+          claim_retry_count INTEGER DEFAULT 0,
+          last_claim_retry_at TEXT,
+          claim_nonce     TEXT
+        );
+
+        INSERT INTO brix_pending_payments SELECT * FROM brix_pending_payments_nf;
+        DROP TABLE brix_pending_payments_nf;
+
+        CREATE INDEX IF NOT EXISTS idx_pending_user ON brix_pending_payments(user_id, status);
+        CREATE INDEX IF NOT EXISTS idx_pending_hash ON brix_pending_payments(payment_hash);
+        CREATE INDEX IF NOT EXISTS idx_pending_server_hash ON brix_pending_payments(server_payment_hash);
+      `);
+      console.log('[DB] Migration complete: needs_funding status added');
+    }
+  } catch (migrationErr) {
+    // Table might not exist yet
+  }
+
   // Migration: add 'paid' and 'failed' statuses to existing brix_fee_transactions
   try {
     const tableInfo = conn.prepare(`SELECT sql FROM sqlite_master WHERE name = 'brix_fee_transactions'`).get();
