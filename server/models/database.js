@@ -256,6 +256,23 @@ function initialize() {
     // Table might not exist yet
   }
 
+  // Migration: sweep de taxas da plataforma (vTAXA 23/11) — marcação de quais
+  // taxas já foram varridas pro endereço da dona + KV pro timestamp do sweep.
+  try {
+    const ppCols = conn.prepare("PRAGMA table_info(brix_pending_payments)").all().map(c => c.name);
+    if (!ppCols.includes('fee_swept_at')) {
+      console.log('[DB] Migrating brix_pending_payments: adding fee_swept_at...');
+      conn.exec("ALTER TABLE brix_pending_payments ADD COLUMN fee_swept_at TEXT");
+      console.log('[DB] Migration complete: fee_swept_at added');
+    }
+    conn.exec(`CREATE TABLE IF NOT EXISTS brix_meta (
+      key   TEXT PRIMARY KEY,
+      value TEXT
+    )`);
+  } catch (migrationErr) {
+    // Table might not exist yet
+  }
+
   // Migration: add 'paid' and 'failed' statuses to existing brix_fee_transactions
   try {
     const tableInfo = conn.prepare(`SELECT sql FROM sqlite_master WHERE name = 'brix_fee_transactions'`).get();

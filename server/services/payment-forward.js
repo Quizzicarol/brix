@@ -474,6 +474,62 @@ async function _tickInner() {
       console.error(`[BRIX] ✗ needs_funding ${nf.id.substring(0, 8)} falhou (${err.message}) → ${backTo}`);
     }
   }
+
+  // ── 7c. vTAXA: sweep diário das taxas da plataforma → tutoriais@coinos.io ──
+  // As taxas deduzidas no recebimento (lnurl) ficam na carteira do servidor.
+  // 1x por dia, se o acumulado (só de pendências ENTREGUES) passa do mínimo,
+  // manda pro endereço da dona via LNURL — um pagamento só, uma taxa de rede só.
+  const SWEEP_MIN_SATS = 1000;
+  const SWEEP_INTERVAL_MS = 24 * 3600 * 1000;
+  try {
+    const lastStr = db.prepare("SELECT value FROM brix_meta WHERE key = 'platform_fee_last_sweep'").get()?.value;
+    const lastMs = Number(lastStr || 0);
+    if (Date.now() - lastMs >= SWEEP_INTERVAL_MS) {
+      const due = db.prepare(`
+        SELECT COUNT(*) AS n, COALESCE(SUM(fee_sats), 0) AS sats
+        FROM brix_pending_payments
+        WHERE status = 'forwarded' AND fee_sats > 0 AND fee_swept_at IS NULL
+      `).get();
+      if ((due?.sats || 0) >= SWEEP_MIN_SATS) {
+        const dest = process.env.PLATFORM_FEE_LN_ADDRESS || 'tutoriais@coinos.io';
+        console.log(`[FEE] 💰 sweep de taxas: ${due.sats} sats de ${due.n} pendência(s) → ${dest}`);
+        const invoice = await lnurlPay(dest, due.sats);
+        const result = await wallet.payInvoice(invoice);
+        const now = new Date().toISOString();
+        db.prepare("UPDATE brix_pending_payments SET fee_swept_at = ? WHERE status = 'forwarded' AND fee_sats > 0 AND fee_swept_at IS NULL").run(now);
+        db.prepare("REPLACE INTO brix_meta (key, value) VALUES ('platform_fee_last_sweep', ?)").run(String(Date.now()));
+        console.log(`[FEE] ✓ sweep enviado: ${due.sats} sats (hash=${String(result.paymentHash || '').substring(0, 16)})`);
+      }
+    }
+  } catch (err) {
+    console.error(`[FEE] ✗ sweep de taxas falhou (não bloqueia, tenta no próximo tick): ${err.message}`);
+  }
+}
+
+// vTAXA: helpers LNURL do sweep (resolve Lightning Address → invoice bolt11)
+async function fetchJson(url) {
+  const resp = await fetch(url, { headers: { accept: 'application/json' } });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} em ${url.slice(0, 60)}`);
+  return resp.json();
+}
+
+async function lnurlPay(address, amountSats) {
+  const [user, domain] = String(address).split('@');
+  if (!user || !domain) throw new Error(`Lightning Address inválido: ${address}`);
+  const meta = await fetchJson(`https://${domain}/.well-known/lnurlp/${encodeURIComponent(user)}`);
+  if (!meta?.callback || meta.tag !== 'payRequest') {
+    throw new Error(`LNURL inválido em ${address}: ${JSON.stringify(meta).slice(0, 120)}`);
+  }
+  const msat = amountSats * 1000;
+  if (msat < (meta.minSendable || 0) || msat > (meta.maxSendable || Infinity)) {
+    throw new Error(`valor fora dos limites LNURL (${meta.minSendable}-${meta.maxSendable} msat)`);
+  }
+  const cbUrl = new URL(meta.callback);
+  cbUrl.searchParams.set('amount', String(msat));
+  cbUrl.searchParams.set('comment', `Bro platform fees (${new Date().toISOString().slice(0, 10)})`);
+  const inv = await fetchJson(cbUrl.toString());
+  if (!inv?.pr) throw new Error(`callback LNURL sem invoice: ${JSON.stringify(inv).slice(0, 120)}`);
+  return inv.pr;
 }
 
 function start() {
