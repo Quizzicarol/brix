@@ -219,7 +219,7 @@ router.get('/:identifier/callback', lnurlCallbackLimiter, async (req, res) => {
         // isso (revive o sistema de 1% do f71d8a7, morto na migração Spark).
         // A app já fatura pelo net_amount_sats (endpoint /pending-payments
         // devolve net como claim amount) — zero mudança de app necessária.
-        const FEE_RATE = Number(process.env.BRIX_PLATFORM_FEE_RATE || '0.01');
+        const FEE_RATE = Number(process.env.BRIX_PLATFORM_FEE_RATE || '0.005');
         const feeSats = amountSats > 1 ? Math.max(1, Math.round(amountSats * FEE_RATE)) : 0;
         const netSats = amountSats - feeSats;
         if (feeSats > 0) {
