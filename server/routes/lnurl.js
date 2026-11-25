@@ -214,17 +214,10 @@ router.get('/:identifier/callback', lnurlCallbackLimiter, async (req, res) => {
       if (serverInvoice && serverInvoice.bolt11) {
         const { bolt11, paymentHash } = serverInvoice;
 
-        // vTAXA (23/11): taxa da plataforma na intermediação offline —
-        // deduzida NO MOMENTO do recebimento e gravada nas colunas feitas pra
-        // isso (revive o sistema de 1% do f71d8a7, morto na migração Spark).
-        // A app já fatura pelo net_amount_sats (endpoint /pending-payments
-        // devolve net como claim amount) — zero mudança de app necessária.
-        const FEE_RATE = Number(process.env.BRIX_PLATFORM_FEE_RATE || '0.005');
-        const feeSats = amountSats > 1 ? Math.max(1, Math.round(amountSats * FEE_RATE)) : 0;
-        const netSats = amountSats - feeSats;
-        if (feeSats > 0) {
-          console.log(`[LNURL] 💰 taxa plataforma: ${feeSats} sats (${(FEE_RATE * 100).toFixed(1)}% de ${amountSats}) → líquido ${netSats}`);
-        }
+        // Recebimento BRIX é gratuito: o destinatário recebe o valor integral.
+        // A taxa da plataforma, quando houver, pertence somente ao envio.
+        const feeSats = 0;
+        const netSats = amountSats;
 
         // Store as pending payment — will be forwarded when recipient comes online
         const pendingId = crypto.randomUUID();
